@@ -9,14 +9,16 @@ from tqdm import tqdm
 import time
 import copy
 
-import cv_models.models as models
-from snip import SNIP
+# import cv_models.models as models
+# from snip import SNIP
+import models.models as models
+from SNIP import SNIP
 from utils import apply_prune_mask, compare_model
 import wandb
 
 class Client:
 
-    def __init__(self, id, device, train_data, test_data, prune_strategy=None, net=models.MNISTNet,
+    def __init__(self, id, device, train_data, test_data, prune_strategy=None, net=models.CNN2,
                  local_epochs=10, learning_rate=0.01, momentum=0.9, weight_decay=0.001):
         '''Construct a new client.
 
@@ -102,8 +104,11 @@ class Client:
             #     dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
         handlers = None
         if self.prune_strategy == 'SNIP':
-            keep_masks = SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
-            handlers = apply_prune_mask(self.net, keep_masks)
+            prune_criterion = SNIP(model=self.net, limit=sparsity, start=None, steps=None, device=self.device)
+            # prune_criterion = SNAP(model=net, device=device)
+            prune_criterion.prune(sparsity, train_loader=self.train_data, manager=None)    
+            # keep_masks = SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
+            # handlers = apply_prune_mask(self.net, keep_masks)
 
         # init_params = self.net.state_dict()
         init_model = copy.deepcopy(self.net)
@@ -117,6 +122,8 @@ class Client:
             running_loss = 0.
             # print(len(self.train_data))
             for inputs, labels in self.train_data:
+                if self.net.is_maskable:
+                    self.net.apply_weight_mask()
                 # print(labels)
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
@@ -128,6 +135,9 @@ class Client:
                 #     loss += args.prox / 2. * self.net.proximal_loss(global_params)
                 loss.backward()
                 self.optimizer.step()
+
+                if self.net.is_maskable:
+                    self.net.apply_weight_mask()
 
                 # self.net
 
@@ -147,7 +157,7 @@ class Client:
             for h in handlers:
                 h.remove()
 
-        # compare_model(self.net.state_dict(), init_model.state_dict())
+        compare_model(self.net.state_dict(), init_model.state_dict())
         # print(f'local training cost: {time.time() - t0}')
 
         # # we only need to transmit the masked weights and all biases

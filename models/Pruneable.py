@@ -2,12 +2,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .GeneralModel import GeneralModel
-from .assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
-from .assisting_layers.L0_Layers import L0Linear, L0Conv2d
+from models.GeneralModel import GeneralModel
+from models.networks.assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
+from models.networks.assisting_layers.L0_Layers import L0Linear, L0Conv2d
 # from utils.constants import ZERO_SIGMA
-
-ZERO_SIGMA = -1 * 1e6
+from utils import ZERO_SIGMA
 
 
 class Pruneable(GeneralModel):
@@ -51,12 +50,6 @@ class Pruneable(GeneralModel):
         super(Pruneable, self).__init__(device=device, **kwargs)
         self.criterion = criterion
 
-    def clear_gradients(self):
-        for _, layer in self.named_children():
-            for _, param in layer.named_parameters():
-                del param.grad
-        torch.cuda.empty_cache()
-
     def get_num_nodes(self, init=False):
         counter = 0
         addition = 0
@@ -83,6 +76,12 @@ class Pruneable(GeneralModel):
         else:
             self.Linear = ContainerLinear
             self.Conv2d = ContainerConv2d
+
+    def clear_gradients(self):
+        for _, layer in self.named_children():
+            for _, param in layer.named_parameters():
+                del param.grad
+        torch.cuda.empty_cache()
 
     def post_init_implementation(self):
 

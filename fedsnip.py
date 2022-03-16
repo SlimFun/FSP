@@ -19,7 +19,7 @@ import warnings
 import wandb
 
 from datasets import get_dataset
-from cv_models.models import all_models
+from models.models import all_models
 
 from client import Client
 from utils import *
@@ -141,7 +141,7 @@ for server_round in tqdm(range(args.rounds)):
 
         # wandb.watch(client.net, log='all')
 
-        train_result = client.train(global_params=global_params, initial_global_params=initial_global_params, sparsity=0.1)
+        train_result = client.train(global_params=global_params, initial_global_params=initial_global_params, sparsity=0.3)
         cl_params = train_result['state']
 
         client.net.clear_gradients() # to save memory

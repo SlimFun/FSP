@@ -19,7 +19,7 @@ import warnings
 import wandb
 
 from datasets import get_dataset
-from cv_models.models import all_models
+from models.models import all_models
 
 from client import Client
 from utils import *
