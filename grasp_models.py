@@ -7,7 +7,7 @@ import torch.nn.functional as F
 # from torch.nn.utils import prune
 import prune as torch_prune
 import warnings
-from models import PrunableNet, initialize_mask
+from cv_models.models import PrunableNet, initialize_mask
 
 from synflow.Layers import layers
 #############################

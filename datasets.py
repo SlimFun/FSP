@@ -72,6 +72,18 @@ def distribute_iid(train, test, clients=400, samples_per_client=40, batch_size=3
 
     return train_idx, test_idx
 
+def classic_iid(train, test, clients=400, batch_size=32, rng=None):
+
+    total_num = len(train.targets)
+    train_idx = np.random.permutation(total_num)
+    train_idx = np.array_split(train_idx, clients)
+
+    test_num = len(test.targets)
+    test_idx = np.random.permutation(test_num)
+    test_idx = np.array_split(test_idx, clients)
+
+    return train_idx, test_idx
+
 
 def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=400,
                          classes=2, samples=20, batch_size=32, beta=0.1,
@@ -111,7 +123,7 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
 
     rng = np.random.default_rng(rng)
 
-    if mode in ('dirichlet', 'iid'):
+    if mode in ('dirichlet', 'iid', 'classic_iid'):
         if dataset == 'mnist':
             xfrm = torchvision.transforms.Compose([
                 torchvision.transforms.ToTensor(),
@@ -139,6 +151,8 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
             train_idx, test_idx = distribute_clients_dirichlet(train, test, clients=clients, beta=beta)
         elif mode == 'iid':
             train_idx, test_idx = distribute_iid(train, test, clients=clients, samples_per_client=samples)
+        elif mode == 'classic_iid':
+            train_idx, test_idx = classic_iid(train, test, clients=clients)
 
     elif mode == 'lotteryfl':
         if dataset == 'mnist':

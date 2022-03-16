@@ -15,9 +15,11 @@ from copy import deepcopy
 from tqdm import tqdm
 import warnings
 
+import wandb
+
 from datasets import get_dataset
-import models
-from models import all_models, needs_mask, initialize_mask
+import cv_models.models as models
+from cv_models.models import all_models, needs_mask, initialize_mask
 
 rng = np.random.default_rng()
 
@@ -34,7 +36,7 @@ parser.add_argument('--rounds', type=int, help='number of global rounds', defaul
 parser.add_argument('--epochs', type=int, help='number of local epochs', default=10)
 parser.add_argument('--dataset', type=str, choices=('mnist', 'emnist', 'cifar10', 'cifar100'),
                     default='mnist', help='Dataset to use')
-parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid'), default='dirichlet',
+parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid', 'classic_iid'), default='dirichlet',
                     help='how should the dataset be distributed?')
 parser.add_argument('--beta', type=float, default=0.1, help='Beta parameter (unbalance rate) for Dirichlet distribution')
 parser.add_argument('--total-clients', type=int, help='split the dataset between this many clients. Ignored for EMNIST.', default=400)
@@ -244,7 +246,9 @@ class Client:
             self.net.train()
 
             running_loss = 0.
+            # print(len(self.train_data))
             for inputs, labels in self.train_data:
+                # print(labels)
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
                 self.optimizer.zero_grad()
@@ -323,6 +327,13 @@ dprint('Initializing clients...')
 clients = {}
 client_ids = []
 
+wandb.init(
+            # project="federated_nas",
+            project="feddst",
+            name="FedDST(d)",
+            config=args
+        )
+
 for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
     cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
                 learning_rate=args.eta, local_epochs=args.epochs,
@@ -369,6 +380,7 @@ upload_cost = np.zeros(len(clients))
 
 # for each round t = 1, 2, ... do
 for server_round in tqdm(range(args.rounds)):
+    # print(clients)
 
     # sample clients
     client_indices = rng.choice(list(clients.keys()), size=args.clients)
@@ -405,11 +417,13 @@ for server_round in tqdm(range(args.rounds)):
             dprint('readjusting', readjustment_ratio)
 
         # determine sparsity desired at the end of this round
-        # ...via linear interpolation
+        # ...via linear interpolationl
         if server_round <= args.rate_decay_end:
             round_sparsity = args.sparsity * (args.rate_decay_end - server_round) / args.rate_decay_end + args.final_sparsity * server_round / args.rate_decay_end
         else:
             round_sparsity = args.final_sparsity
+
+        print(f'round_sparsity: {round_sparsity}')
 
         # actually perform training
         train_result = client.train(global_params=global_params, initial_global_params=initial_global_params,
@@ -521,39 +535,45 @@ for server_round in tqdm(range(args.rounds)):
 
     # evaluate performance
     torch.cuda.empty_cache()
-    if server_round % args.eval_every == 0 and args.eval:
-        accuracies, sparsities = evaluate_global(clients, global_model, progress=True,
-                                                 n_batches=args.test_batches)
+    # if server_round % args.eval_every == 0 and args.eval:
+    # accuracies, sparsities = evaluate_global(clients, global_model, progress=True,
+    #                                             n_batches=args.test_batches)
+    accuracies, sparsities = evaluate_local(clients, global_model, progress=True,
+                                                    n_batches=args.test_batches)
 
     for client_id in clients:
         i = client_ids.index(client_id)
         if server_round % args.eval_every == 0 and args.eval:
-            print_csv_line(pid=args.pid,
-                           dataset=args.dataset,
-                           clients=args.clients,
-                           total_clients=len(clients),
-                           round=server_round,
-                           batch_size=args.batch_size,
-                           epochs=args.epochs,
-                           target_sparsity=round_sparsity,
-                           pruning_rate=args.readjustment_ratio,
-                           initial_pruning_threshold='',
-                           final_pruning_threshold='',
-                           pruning_threshold_growth_method='',
-                           pruning_method='',
-                           lth=False,
-                           client_id=client_id,
-                           accuracy=accuracies[client_id],
-                           sparsity=sparsities[client_id],
-                           compute_time=compute_times[i],
-                           download_cost=download_cost[i],
-                           upload_cost=upload_cost[i])
+            pass
+            # print_csv_line(pid=args.pid,
+            #                dataset=args.dataset,
+            #                clients=args.clients,
+            #                total_clients=len(clients),
+            #                round=server_round,
+            #                batch_size=args.batch_size,
+            #                epochs=args.epochs,
+            #                target_sparsity=round_sparsity,
+            #                pruning_rate=args.readjustment_ratio,
+            #                initial_pruning_threshold='',
+            #                final_pruning_threshold='',
+            #                pruning_threshold_growth_method='',
+            #                pruning_method='',
+            #                lth=False,
+            #                client_id=client_id,
+            #                accuracy=accuracies[client_id],
+            #                sparsity=sparsities[client_id],
+            #                compute_time=compute_times[i],
+            #                download_cost=download_cost[i],
+            #                upload_cost=upload_cost[i])
 
         # if we didn't send initial global params to any clients in the first round, send them now.
         # (in the real world, this could be implemented as the transmission of
         # a random seed, so the time and place for this is not a concern to us)
         if server_round == 0:
             clients[client_id].initial_global_params = initial_global_params
+
+    wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=server_round)
+    wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
 
     if server_round % args.eval_every == 0 and args.eval:
         # clear compute, UL, DL costs

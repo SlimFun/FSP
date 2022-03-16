@@ -15,8 +15,8 @@ from tqdm import tqdm
 import warnings
 
 from datasets import get_dataset
-import models
-from models import all_models, needs_mask, initialize_mask
+import cv_models.models as models
+from cv_models.models import all_models, needs_mask, initialize_mask
 
 import pickle
 
