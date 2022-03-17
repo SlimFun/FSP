@@ -83,6 +83,12 @@ class Pruneable(GeneralModel):
                 del param.grad
         torch.cuda.empty_cache()
 
+    def rebuild_mask(self):
+        # if self.is_maskable:
+        self.mask = {name + ".weight": torch.ones_like(module.weight.data).to(self.device) for name, module in
+                        self.named_modules() if isinstance(module, (nn.Linear, nn.Conv2d))
+                        }
+
     def post_init_implementation(self):
 
         with torch.no_grad():

@@ -235,8 +235,12 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
     # we need to perform an update to client's weights.
     with torch.no_grad():
-        accuracies = {}
+        train_accuracies = {}
+        train_losses = {}
         # sparsities = {}
+
+        test_accuracies = {}
+        test_losses = {}
 
         if progress:
             enumerator = tqdm(clients.items())
@@ -245,10 +249,17 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
         for client_id, client in enumerator:
             client.reset_weights(global_state_dict=global_model.state_dict())
-            accuracies[client_id] = client.test().item()
+            accuracy, loss = client.test(train_data=True)
+            train_accuracies[client_id] = accuracy
+            train_losses[client_id] = loss
+            # accuracies[client_id] = client.test().item()
             # sparsities[client_id] = client.sparsity()
 
-    return accuracies
+            accuracy, loss = client.test(train_data=False)
+            test_accuracies[client_id] = accuracy
+            test_losses[client_id] = loss
+
+    return train_accuracies, train_losses, test_accuracies, test_losses
 
 
 def print2(*arg, **kwargs):

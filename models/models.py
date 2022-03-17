@@ -5,7 +5,7 @@ import torch.cuda
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .vgg import VGG_SNIP
+from .vgg import VGG_SNIP, vgg11_bn
 from .Pruneable import Pruneable
 
 class CNN2(Pruneable):
@@ -38,5 +38,6 @@ class CNN2(Pruneable):
 
 all_models = {
         'CNNNet': CNN2,
-        'VGG_SNIP': VGG_SNIP
+        'VGG_SNIP': VGG_SNIP,
+        'VGG11_BN': vgg11_bn
 }

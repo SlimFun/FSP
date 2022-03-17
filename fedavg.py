@@ -23,6 +23,7 @@ from models.models import all_models
 
 from client import Client
 from utils import *
+import copy
 
 rng = np.random.default_rng()
 
@@ -58,6 +59,9 @@ parser.add_argument('--eval-every', default=2, type=int, help='Evaluate on test 
 parser.add_argument('--device', default='0', type=device_list, help='Device to use for compute. Use "cpu" to force CPU. Otherwise, separate with commas to allow multi-GPU.')
 parser.add_argument('--no-eval', default=True, action='store_false', dest='eval')
 parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileType('a', encoding='ascii'))
+
+parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet'),
+                    default='VGG11_BN', help='Dataset to use')
 
 args = parser.parse_args()
 devices = [torch.device(x) for x in args.device]
@@ -97,19 +101,21 @@ wandb.init(
             config=args
         )
 
-model = 'CNNNet'
+# model = 'CNNNet'
+# model = 'VGG_SNIP'
+# model = 'VGG11_BN'
 
 for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
     # cl = Client(client_id, *client_loaders, net=all_models[model],
     #             learning_rate=args.eta, local_epochs=args.epochs, prune_strategy='SNIP')
-    cl = Client(client_id, *client_loaders, net=all_models[model],
+    cl = Client(client_id, *client_loaders, net=all_models[args.model],
                 learning_rate=args.eta, local_epochs=args.epochs)
     clients[client_id] = cl
     client_ids.append(client_id)
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[model](device='cpu')
+global_model = all_models[args.model](device='cpu')
 # init_net(global_model)
 
 
@@ -124,7 +130,7 @@ for server_round in tqdm(range(args.rounds)):
     # print(clients)
 
     # sample clients
-    client_indices = rng.choice(list(clients.keys()), size=args.clients)
+    client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
 
     # global_params = global_model.cpu().state_dict()
     global_params = deepcopy(global_model.state_dict())
@@ -182,7 +188,9 @@ for server_round in tqdm(range(args.rounds)):
     # evaluate performance
     torch.cuda.empty_cache()
     if server_round % args.eval_every == 0:
-        accuracies = evaluate_local(clients, global_model, progress=True,
+        global_model_cp = copy.deepcopy(global_model)
+
+        accuracies = evaluate_local(clients, global_model_cp, progress=True,
                                                     n_batches=args.test_batches)
 
         wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=server_round)

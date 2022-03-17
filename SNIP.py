@@ -6,6 +6,16 @@ import torch.nn.functional as F
 from models.criterions.General import General
 # from utils.constants import RESULTS_DIR, OUTPUT_DIR, SNIP_BATCH_ITERATIONS
 from utils import *
+import copy
+import types
+
+def snip_forward_conv2d(self, x):
+        return F.conv2d(x, self.weight * self.weight_mask, self.bias,
+                        self.stride, self.padding, self.dilation, self.groups)
+
+
+def snip_forward_linear(self, x):
+        return F.linear(x, self.weight * self.weight_mask, self.bias)
 
 
 class SNIP(General):
@@ -48,12 +58,13 @@ class SNIP(General):
 
         # threshold
         threshold, _ = torch.topk(all_scores, num_params_to_keep, sorted=True)
-        print(all_scores.shape)
-        print(float(torch.nonzero(all_scores).shape[0])/all_scores.shape[0])
+        # print(all_scores.shape)
+        # print(float(torch.nonzero(all_scores).shape[0])/all_scores.shape[0])
         acceptable_score = threshold[-1]
-
+        
         # prune
         for name, grad in grads_abs.items():
+            # self.model.mask[name] = ((grad / norm_factor) >= acceptable_score).float().to(self.device)
             # print(self.model.mask[name].sum().item())
             # self.model.mask[name] = ((grad / norm_factor) > acceptable_score).__and__(
             #     self.model.mask[name].bool()).float().to(self.device)
@@ -77,39 +88,83 @@ class SNIP(General):
 
     def get_weight_saliencies(self, train_loader):
 
-        net = self.model.eval()
+        inputs, targets = next(iter(train_loader))
+        inputs = inputs.to(self.device)
+        targets = targets.to(self.device)
 
-        iterations = SNIP_BATCH_ITERATIONS
-        # iterations = 1
+        # Let's create a fresh copy of the network so that we're not worried about
+        # affecting the actual training-phase
+        net = copy.deepcopy(self.model)
 
-        # accumalate gradients of multiple batches
+        # Monkey-patch the Linear and Conv2d layer to learn the multiplicative mask
+        # instead of the weights
+        for layer in net.modules():
+            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
+                layer.weight_mask = nn.Parameter(torch.ones_like(layer.weight))
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad = False
+
+            # Override the forward methods:
+            if isinstance(layer, nn.Conv2d):
+                layer.forward = types.MethodType(snip_forward_conv2d, layer)
+
+            if isinstance(layer, nn.Linear):
+                layer.forward = types.MethodType(snip_forward_linear, layer)
+
+        # Compute gradients (but don't apply them)
         net.zero_grad()
-        loss_sum = torch.zeros([1]).to(self.device)
-        for i, (x, y) in enumerate(train_loader):
+        outputs = net.forward(inputs)
+        # loss = F.nll_loss(outputs, targets)
+        loss = F.cross_entropy(outputs, targets)
+        loss.backward()
 
-            if i == iterations: break
-
-            inputs = x.to(self.model.device)
-            targets = y.to(self.model.device)
-            outputs = net.forward(inputs)
-            loss = F.nll_loss(outputs, targets) / iterations
-            loss.backward()
-            loss_sum += loss.item()
-
-        # get elasticities
         grads_abs = {}
         for name, layer in net.named_modules():
             if "Norm" in str(layer): continue
             if name + ".weight" in self.model.mask:
-                # grads_abs[name + ".weight"] = torch.abs(
-                    # layer.weight.grad * (layer.weight.data / (1e-8 + loss_sum.item())))
-                grads_abs[name + ".weight"] = torch.abs(
-                    layer.weight.grad * (layer.weight.data))
+                grads_abs[name + ".weight"] = torch.abs(layer.weight_mask.grad)
+        # for layer in net.modules():
+        #     if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
+        #         grads_abs.append(torch.abs(layer.weight_mask.grad))
+
+        # Gather all scores in a single vector and normalise
         all_scores = torch.cat([torch.flatten(x) for _, x in grads_abs.items()])
-        norm_factor = 1
-        log10 = all_scores.sort().values.log10()
+        norm_factor = torch.sum(all_scores)
         all_scores.div_(norm_factor)
 
-        self.model = self.model.train()
+        # net = self.model.eval()
 
-        return all_scores, grads_abs, log10, norm_factor
+        # iterations = SNIP_BATCH_ITERATIONS
+        # # iterations = 1
+
+        # # accumalate gradients of multiple batches
+        # net.zero_grad()
+        # loss_sum = torch.zeros([1]).to(self.device)
+        # for i, (x, y) in enumerate(train_loader):
+
+        #     if i == iterations: break
+
+        #     inputs = x.to(self.model.device)
+        #     targets = y.to(self.model.device)
+        #     outputs = net.forward(inputs)
+        #     loss = F.nll_loss(outputs, targets) / iterations
+        #     loss.backward()
+        #     loss_sum += loss.item()
+
+        # get elasticities
+        # grads_abs = {}
+        # for name, layer in net.named_modules():
+        #     if "Norm" in str(layer): continue
+        #     if name + ".weight" in self.model.mask:
+        #         # grads_abs[name + ".weight"] = torch.abs(
+        #             # layer.weight.grad * (layer.weight.data / (1e-8 + loss_sum.item())))
+        #         grads_abs[name + ".weight"] = torch.abs(
+        #             layer.weight.grad * (layer.weight.data))
+        # all_scores = torch.cat([torch.flatten(x) for _, x in grads_abs.items()])
+        # norm_factor = 1
+        # log10 = all_scores.sort().values.log10()
+        # all_scores.div_(norm_factor)
+
+        # self.model = self.model.train()
+
+        return all_scores, grads_abs, None, norm_factor

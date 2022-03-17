@@ -63,7 +63,8 @@ def SNIP(net, keep_ratio, train_dataloader, device):
     # Compute gradients (but don't apply them)
     net.zero_grad()
     outputs = net.forward(inputs)
-    loss = F.nll_loss(outputs, targets)
+    # loss = F.nll_loss(outputs, targets)
+    loss = F.cross_entropy(outputs, targets)
     loss.backward()
 
     grads_abs = []

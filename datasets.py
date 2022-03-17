@@ -4,6 +4,8 @@ import os
 import torch
 import torchvision
 from tqdm import tqdm
+import torch.utils.data as data
+from torchvision.datasets import CIFAR10
 
 
 def distribute_clients_categorical(x, p, clients=400, beta=0.1):
@@ -76,13 +78,95 @@ def classic_iid(train, test, clients=400, batch_size=32, rng=None):
 
     total_num = len(train.targets)
     train_idx = np.random.permutation(total_num)
-    train_idx = np.array_split(train_idx, clients)
+    train_idx = np.array(np.array_split(train_idx, clients))
 
     test_num = len(test.targets)
     test_idx = np.random.permutation(test_num)
-    test_idx = np.array_split(test_idx, clients)
+    test_idx = np.array(np.array_split(test_idx, clients))
+    # print(total_num)
+    # print(train_idx.shape)
 
     return train_idx, test_idx
+
+class Cutout(object):
+    def __init__(self, length):
+        self.length = length
+
+    def __call__(self, img):
+        h, w = img.size(1), img.size(2)
+        mask = np.ones((h, w), np.float32)
+        y = np.random.randint(h)
+        x = np.random.randint(w)
+
+        y1 = np.clip(y - self.length // 2, 0, h)
+        y2 = np.clip(y + self.length // 2, 0, h)
+        x1 = np.clip(x - self.length // 2, 0, w)
+        x2 = np.clip(x + self.length // 2, 0, w)
+
+        mask[y1: y2, x1: x2] = 0.
+        mask = torch.from_numpy(mask)
+        mask = mask.expand_as(img)
+        img *= mask
+        return img
+
+class CIFAR10_truncated(data.Dataset):
+
+    def __init__(self, root, dataidxs=None, train=True, transform=None, target_transform=None, download=False):
+
+        self.root = root
+        self.dataidxs = dataidxs
+        self.train = train
+        self.transform = transform
+        self.target_transform = target_transform
+        self.download = download
+
+        self.data, self.targets = self.__build_truncated_dataset__()
+
+    def __build_truncated_dataset__(self):
+        print("download = " + str(self.download))
+        cifar_dataobj = CIFAR10(self.root, self.train, self.transform, self.target_transform, self.download)
+
+        if self.train:
+            # print("train member of the class: {}".format(self.train))
+            # data = cifar_dataobj.train_data
+            data = cifar_dataobj.data
+            target = np.array(cifar_dataobj.targets)
+        else:
+            data = cifar_dataobj.data
+            target = np.array(cifar_dataobj.targets)
+
+        if self.dataidxs is not None:
+            data = data[self.dataidxs]
+            target = target[self.dataidxs]
+
+        return data, target
+
+    def truncate_channel(self, index):
+        for i in range(index.shape[0]):
+            gs_index = index[i]
+            self.data[gs_index, :, :, 1] = 0.0
+            self.data[gs_index, :, :, 2] = 0.0
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target = self.data[index], self.targets[index]
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.data)
 
 
 def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=400,
@@ -133,12 +217,36 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
             test = torchvision.datasets.MNIST(path, train=False, download=True, transform=xfrm)
 
         elif dataset == 'cifar10':
-            xfrm = torchvision.transforms.Compose([
+            # xfrm = torchvision.transforms.Compose([
+            #     torchvision.transforms.ToTensor(),
+            #     torchvision.transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            # ])
+
+            # # train = torchvision.datasets.CIFAR10(path, train=True, download=True, transform=train_transform)
+            # # test = torchvision.datasets.CIFAR10(path, train=False, download=True, transform=valid_transform)
+
+            print('......')
+            
+            CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
+            CIFAR_STD = [0.24703233, 0.24348505, 0.26158768]
+
+            train_transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToPILImage(),
+                torchvision.transforms.RandomCrop(32, padding=4),
+                torchvision.transforms.RandomHorizontalFlip(),
                 torchvision.transforms.ToTensor(),
-                torchvision.transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
             ])
-            train = torchvision.datasets.CIFAR10(path, train=True, download=True, transform=xfrm)
-            test = torchvision.datasets.CIFAR10(path, train=False, download=True, transform=xfrm)
+
+            train_transform.transforms.append(Cutout(16))
+
+            valid_transform = torchvision.transforms.Compose([
+                torchvision.transforms.ToTensor(),
+                torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+            ])
+
+            train = CIFAR10_truncated(path, train=True, download=True, transform=train_transform)
+            test = CIFAR10_truncated(path, train=False, download=True, transform=valid_transform)
         elif dataset == 'cifar100':
             xfrm = torchvision.transforms.Compose([
                 torchvision.transforms.ToTensor(),
@@ -176,9 +284,13 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
             # ignore empty clients
             continue
 
+        # print(train_sampler.shape)
         # shuffle
         train_sampler = rng.choice(train_sampler, size=train_sampler.shape, replace=False)
         test_sampler = rng.choice(test_sampler, size=test_sampler.shape, replace=False)
+
+        # print('after')
+        # print(train_sampler.shape)
 
         train_loader = torch.utils.data.DataLoader(train, batch_size=batch_size,
                                                    sampler=train_sampler)
@@ -192,9 +304,64 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
 def get_mnist(*args, **kwargs):
     return get_mnist_or_cifar10('mnist', *args, **kwargs)
 
+def get_centralize_cifar10(dataset='cifar10', path=None, batch_size=32, **kwargs):
+    
+    if path is None:
+        path = os.path.join('..', 'data', dataset)
+
+    # normalize = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
+
+    # train_loader = torch.utils.data.DataLoader(
+    #     torchvision.datasets.CIFAR10(path, train=True, transform=torchvision.transforms.Compose([
+    #         torchvision.transforms.RandomHorizontalFlip(),
+    #         torchvision.transforms.RandomCrop(32, 4),
+    #         torchvision.transforms.ToTensor(),
+    #         normalize,
+    #     ]), download=True),
+    #     batch_size=batch_size, shuffle=True, pin_memory=True)
+
+    # val_loader = torch.utils.data.DataLoader(
+    #     torchvision.datasets.CIFAR10(path, train=False, transform=torchvision.transforms.Compose([
+    #         torchvision.transforms.ToTensor(),
+    #         normalize,
+    #     ])),
+    #     batch_size=batch_size, shuffle=False, pin_memory=True)
+
+
+    CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
+    CIFAR_STD = [0.24703233, 0.24348505, 0.26158768]
+
+    train_transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToPILImage(),
+        torchvision.transforms.RandomCrop(32, padding=4),
+        torchvision.transforms.RandomHorizontalFlip(),
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+    ])
+
+    train_transform.transforms.append(Cutout(16))
+
+    valid_transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+    ])
+
+    train_data = CIFAR10_truncated(path, train=True, download=True, transform=train_transform)
+    val_data = CIFAR10_truncated(path, train=False, download=True, transform=valid_transform)
+
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(dataset=val_data, batch_size=batch_size, shuffle=False)
+
+    return {0: (train_loader, val_loader)}
 
 def get_cifar10(*args, **kwargs):
-    return get_mnist_or_cifar10('cifar10', *args, **kwargs)
+    if 'centralize' in kwargs.keys() and kwargs['centralize']:
+        print('centralize')
+        # pass
+        return get_centralize_cifar10('cifar10', *args, **kwargs)
+    else:
+        return get_mnist_or_cifar10('cifar10', *args, **kwargs)
 
 
 def get_cifar100(*args, **kwargs):
@@ -279,10 +446,13 @@ def get_dataset(dataset, devices=None, **kwargs):
     new_loaders = {}
     for i, (uid, (train_loader, test_loader)) in enumerate(loaders.items()):
         device = devices[i % len(devices)]
-        train_data = [(x.to(device), y.to(device)) for x, y in train_loader]
-        test_data = [(x.to(device), y.to(device)) for x, y in test_loader]
+        # train_data = [(x.to(device), y.to(device)) for x, y in train_loader]
+        # test_data = [(x.to(device), y.to(device)) for x, y in test_loader]
+        # train_data = [(x, y) for x, y in train_loader]
+        # test_data = [(x, y) for x, y in test_loader]
 
-        new_loaders[uid] = (device, train_data, test_data)
+        # new_loaders[uid] = (device, train_data, test_data)
+        new_loaders[uid] = (device, train_loader, test_loader)
 
     return new_loaders
 
