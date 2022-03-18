@@ -1,3 +1,4 @@
+import copy
 import os
 import logging
 
@@ -248,14 +249,14 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
             enumerator = clients.items()
 
         for client_id, client in enumerator:
-            client.reset_weights(global_state_dict=global_model.state_dict())
-            accuracy, loss = client.test(train_data=True)
+            # client.reset_weights(global_state_dict=global_model.state_dict())
+            accuracy, loss = client.test(model=global_model, train_data=True)
             train_accuracies[client_id] = accuracy
             train_losses[client_id] = loss
             # accuracies[client_id] = client.test().item()
             # sparsities[client_id] = client.sparsity()
 
-            accuracy, loss = client.test(train_data=False)
+            accuracy, loss = client.test(model=global_model, train_data=False)
             test_accuracies[client_id] = accuracy
             test_losses[client_id] = loss
 
@@ -285,12 +286,16 @@ def needs_mask(name):
 def compare_model(model_a, model_b):
     diff_c = 0
     total_p = 0
+    d1 = None
+    d2 = None
     for name, params in model_a.items():
         # if needs_mask(name):
+        d1 = params.device
+        d2 = model_b[name].device
         diff = params - model_b[name]
-        diff_c += sum(np.where(diff.to('cpu').view(-1).numpy(), 0, 1))
+        diff_c += sum(np.where(diff.to('cpu', copy=True).view(-1).numpy(), 0, 1))
         total_p += params.numel()
-    print(f'non changed: {float(diff_c) / total_p}, total_p: {total_p}')
+    print(f'non changed: {float(diff_c) / total_p}, total_p: {total_p}, {d1}-{d2}')
 
 def apply_prune_mask(net, keep_masks):
 

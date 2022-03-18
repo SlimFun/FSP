@@ -122,20 +122,20 @@ class Client:
             #     # otherwise, there is a DL cost: we need to receive all parameters masked '1' and
             #     # all parameters that don't have a mask (e.g. biases in this case)
             #     dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
-        # handlers = None
-        # if self.prune_strategy == 'SNIP':
-        #     if not (self.prune_at_first_round and self.pruned):
-        #         print(f'client: {self.id} **************')
-        #         prune_criterion = SNIP.SNIP(model=self.net, limit=sparsity, start=None, steps=None, device=self.device)
-        #         # prune_criterion = SNAP(model=net, device=device)
-        #         prune_criterion.prune(sparsity, train_loader=self.train_data, manager=None)
-        #         self.pruned = True
+        handlers = None
+        if self.prune_strategy == 'SNIP':
+            if not (self.prune_at_first_round and self.pruned):
+                print(f'client: {self.id} **************')
+                prune_criterion = SNIP.SNIP(model=self.net, limit=sparsity, start=None, steps=None, device=self.device)
+                # prune_criterion = SNAP(model=net, device=device)
+                prune_criterion.prune(sparsity, train_loader=self.train_data, manager=None)
+                self.pruned = True
             
         #     # keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
         #     # handlers = apply_prune_mask(self.net, keep_masks)
 
-        # if self.check_prunable():
-        #     self.net.apply_weight_mask()
+        if self.check_prunable():
+            self.net.apply_weight_mask()
 
         # init_params = self.net.state_dict()
         init_model = copy.deepcopy(self.net)
@@ -154,8 +154,8 @@ class Client:
             for inputs, labels in self.train_data:
                 # print(f'i : {i}')
                 # i += 1
-                # if self.check_prunable():
-                #     self.net.apply_weight_mask()
+                if self.check_prunable():
+                    self.net.apply_weight_mask()
                 # print(labels)
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
@@ -168,17 +168,18 @@ class Client:
                 loss.backward()
                 self.optimizer.step()
                 total += len(labels)
-                # if self.check_prunable():
-                #     self.net.apply_weight_mask()
+                if self.check_prunable():
+                    self.net.apply_weight_mask()
 
                 # self.net
 
                 # self.reset_weights() # applies the mask
 
                 running_loss += loss.item()
+
+            print(f'running loss: {running_loss / len(self.train_data)}')
             
             # print(running_loss)
-
 
             self.curr_epoch += 1
         print('total: ', total)
@@ -189,11 +190,11 @@ class Client:
         for param_tensor in finish_params:
             finish_params[param_tensor] -= init_model.state_dict()[param_tensor]
 
-        # if handlers is not None:
-        #     for h in handlers:
-        #         h.remove()
+        if handlers is not None:
+            for h in handlers:
+                h.remove()
 
-        # compare_model(self.net.state_dict(), init_model.state_dict())
+        compare_model(self.net.state_dict(), init_model.state_dict())
         # print(f'local training cost: {time.time() - t0}')
 
         # # we only need to transmit the masked weights and all biases
@@ -228,6 +229,7 @@ class Client:
 
         _model.eval()
         data_loader = self.train_data if train_data else self.test_data
+        # _model.apply_weight_mask()
         with torch.no_grad():
             for i, (inputs, labels) in enumerate(data_loader):
                 if i > n_batches and n_batches > 0:
@@ -235,6 +237,8 @@ class Client:
                 # if not args.cache_test_set_gpu:
                 #     inputs = inputs.to(self.device)
                 #     labels = labels.to(self.device)
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
                 outputs = _model(inputs)
                 loss += self.criterion(outputs, labels) * len(labels)
                 outputs = torch.argmax(outputs, dim=-1)
