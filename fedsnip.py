@@ -284,8 +284,8 @@ def main(args):
 
         # evaluate performance
         torch.cuda.empty_cache()
-        for name in global_model.mask:
-            global_model.mask[name] = torch.zeros_like(global_model.mask[name], dtype=torch.float, device=devices[0])
+        # for name in global_model.mask:
+        #     global_model.mask[name] = torch.zeros_like(global_model.mask[name], dtype=torch.float, device=devices[0])
             # # a = global_model.mask[name].view(-1).to(device='cpu', copy=True).numpy()
             # # pruned_c +=sum(np.where(a, 0, 1))
             # total += aggregated_masks[name].numel()
