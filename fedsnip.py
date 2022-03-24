@@ -29,8 +29,10 @@ from models.models import all_models
 
 from client import Client
 from utils import *
+import random
+from data_loader import load_partition_data_cifar10
 
-rng = np.random.default_rng()
+
 
 def device_list(x):
     if x == 'cpu':
@@ -77,7 +79,28 @@ parser.add_argument('--keep_ratio', type=float, default=0.0,
 parser.add_argument('--prune_vote', type=int, default=1,
                     help='local client batch size')
 
+
+
+def merge_local_masks(keep_masks_dict):
+    #keep_masks_dict[clients][params]
+        for i in range(len(keep_masks_dict[0])):
+            for j in range(1, len(keep_masks_dict.keys())):
+                # params = self.keep_masks_dict[0][j].to('cpu')
+                keep_masks_dict[0][i] += keep_masks_dict[j][i]
+                # if j == len(self.keep_masks_dict.keys())-1:
+                #     diff = self.keep_masks_dict[0][i].view(-1).cpu().numpy()
+                #     self.keep_masks_dict[0][i] = np.where(diff, 0, 1)
+        return keep_masks_dict[0]
+
+
 def main(args):
+
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+
+    rng = np.random.default_rng()
     
     devices = [torch.device(x) for x in args.device]
     args.pid = os.getpid()
@@ -99,7 +122,10 @@ def main(args):
             pickle.dump(loaders, f)
     '''
 
-    loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution, batch_size=args.batch_size, devices=None)
+    path = os.path.join('..', 'data', args.dataset)
+    train_data_num, test_data_num, train_data_global, test_data_global, \
+        train_data_local_num_dict, train_data_local_dict, test_data_local_dict, \
+        class_num = load_partition_data_cifar10(args.dataset, path, 'homo', None, args.total_clients, args.batch_size)
 
     # t0 = time.time()
 
@@ -113,162 +139,90 @@ def main(args):
                 name="FedDST(d)",
                 config=args
             )
-
-    # model = 'VGG11_BN'
-    # prune_strategy = 'SNIP'
-    # prune_at_first_round = False
-    # keep = 0.9
-    # model = 'CNNNet'
-
-    # def clients_local_train(clients, client_indices, global_params, initial_global_params, args):
-
         
 
-    for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
-        cl = Client(id=client_id, device=devices[0], train_data=client_loaders[0], test_data=client_loaders[1], net=all_models[args.model],
+    for i in range(args.total_clients):
+        cl = Client(id=i, device=devices[0], train_data=train_data_local_dict[i], test_data=test_data_local_dict[i], net=all_models[args.model],
                     learning_rate=args.eta, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
-        # cl = Client(client_id, *client_loaders, net=all_models[args.model],
-        #             learning_rate=args.eta, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
-        # cl = Client(client_id, *client_loaders, net=all_models[model],
-        #             learning_rate=args.eta, local_epochs=args.epochs)
-        clients[client_id] = cl
-        client_ids.append(client_id)
+                    
+        clients[i] = cl
+        client_ids.append(i)
         torch.cuda.empty_cache()
 
-    # initialize global model
-    # global_model = all_models[args.model](device='cpu')args.device = args.device[0]
     global_model = all_models[args.model](device=devices[0])
     # init_net(global_model)
-    global_model = global_model.to(global_model.device)
+    # global_model.load_state_dict(torch.load('init_model.pt'))
+    global_model = global_model.to(devices[0])
+    # global_model.load_state_dict(torch.load('init_model.pt'))
 
 
+    init_model = deepcopy(global_model)
     initial_global_params = deepcopy(global_model.state_dict())
 
-    def test_model(model, device, data_loader):
-
-        criterion = nn.CrossEntropyLoss()
-
-        # we need to perform an update to client's weights.
-        with torch.no_grad():
-            correct = 0.
-            total = 0.
-            loss = 0.
-
-            _model = model.to(device)
-
-            _model.eval()
-            # data_loader = self.train_data if train_data else self.test_data
-            with torch.no_grad():
-                for i, (inputs, labels) in enumerate(data_loader):
-                    # if i > n_batches and n_batches > 0:
-                    #     break
-                    # if not args.cache_test_set_gpu:
-                    #     inputs = inputs.to(self.device)
-                    #     labels = labels.to(self.device)
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
-
-                    outputs = _model(inputs)
-                    loss += criterion(outputs, labels) * len(labels)
-                    outputs = torch.argmax(outputs, dim=-1)
-                    correct += sum(labels == outputs)
-                    total += len(labels)
-
-
-            print(f'test toatl: {total}')
-            # remove copies if needed
-            if model is not _model:
-                del _model
-
-            
-
-            return correct / total, loss / total
-
-
-    # t1 = time.time()
-    # print(f'init cost: {t1 - t0}')
+    global_params = global_model.cpu().state_dict()
 
     # for each round t = 1, 2, ... do
     for server_round in tqdm(range(args.rounds)):
-        # print(clients)
-
-        # sample clients
         client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
+        
+        # global_params = deepcopy(global_model.state_dict())
+        global_params = global_model.cpu().state_dict()
+        global_model = global_model.to(devices[0])
 
-        # global_params = global_model.cpu().state_dict()
-        global_params = deepcopy(global_model.state_dict())
-        aggregated_params = {}
-        aggregated_masks = {}
-        for name, param in global_params.items():
-            aggregated_params[name] = torch.zeros_like(param, dtype=torch.float, device=devices[0])
-            # if isinstance(module, (nn.Linear, nn.Conv2d))
-            if name in global_model.mask.keys():
-                aggregated_masks[name] = torch.zeros_like(param, dtype=torch.float, device=devices[0])
-
-
-        # clients_local_train()
-        # for each client k \in S_t in parallel do
+        keep_masks_dict = {}
+        model_list = []
         total_sampled = 0
         for client_id in client_indices:
             print(f'client {client_id} start !!!')
             client = clients[client_id]
             i = client_ids.index(client_id)
 
-            # wandb.watch(client.net, log='all')
-
             t0 = time.time()
-            train_result = client.train(global_params=global_params, 
-                                        initial_global_params=initial_global_params, 
+            train_result = client.train(global_params=copy.deepcopy(global_params), 
                                         sparsity=1-args.keep_ratio)
             print(f'cost: {time.time()}')
             cl_params = train_result['state']
             cl_mask_prarms = train_result['mask']
 
-            client.net.clear_gradients() # to save memory
+            # client.net.clear_gradients() # to save memory
 
-            # cl_weight_params = {}
-            # global_model.load_state_dict(cl_params) 
+            # keep_masks_dict[client_id] = [c.cpu() for c in cl_mask_prarms.values()]
+            keep_masks_dict[client_id] = cl_mask_prarms
+            model_list.append((client.train_size, cl_params))
 
-            # # first deduce masks for the received weights
-            # for name, cl_param in cl_params.items():
-            #     cl_weight_params[name] = cl_param.to(device='cpu', copy=True)
+        last_params = global_model.cpu().state_dict()
+        global_model = global_model.to(devices[0])
+        # global_model = global_model.to(devices[0])
+        # last_params = global_params
 
-            # at this point, we have weights and masks (possibly all-ones)
-            # for this client. we will proceed by applying the mask and adding
-            # the masked received weights to the aggregate, and adding the mask
-            # to the aggregate as well.
-            for name, cl_param in cl_params.items():
-                aggregated_params[name].add_(client.train_size * cl_param.to(device=devices[0]))
+        training_num = sum(clients[i].train_size for i in client_indices)
 
-                if name in global_model.mask.keys():
-                    aggregated_masks[name].add_(cl_mask_prarms[name].to(device=devices[0]))
-        
+        (num0, averaged_params) = model_list[0]
+        # if averaged_params is not None:
+        for k in averaged_params.keys():
+            # print(k)
+            for i in range(0, len(model_list)):
+                local_sample_number, local_model_params = model_list[i]
+                w = local_sample_number / training_num
+                # w = 1.
+                # print(w)
+                if i == 0:
+                    averaged_params[k] = local_model_params[k] * w
+                else:
+                    averaged_params[k] += local_model_params[k] * w
 
-        # t2 = time.time()
-        # print(f'one round training cost: {t2 - t1}')
+        # for name, param in averaged_params.items():
+        for name in last_params:
+            assert (last_params[name].shape == averaged_params[name].shape)
+            last_params[name] = last_params[name].type_as(averaged_params[name])
+            last_params[name] += averaged_params[name]
+        global_model.load_state_dict(last_params)
 
-        # at this point, we have the sum of client parameters
-        # in aggregated_params, and the sum of masks in aggregated_masks. We
-        # can take the average now by simply dividing...
+        masks = merge_local_masks(keep_masks_dict)
 
-
-        # print(f'start aggregate #############')
-        for name, param in aggregated_params.items():
-            aggregated_params[name] /= sum(clients[i].train_size for i in client_indices)
-            assert (global_params[name].shape == aggregated_params[name].shape)
-            # aggregated_params[name].type_as(global_params[name])
-            global_params[name] = global_params[name].type_as(aggregated_params[name])
-            global_params[name] += aggregated_params[name]
-
-            if name in global_model.mask.keys():
-                global_model.mask[name] = torch.where(aggregated_masks[name]>=args.prune_vote, 1, 0)
-        global_model.load_state_dict(global_params) 
-
-        # yield DebugInfo('', (aggregated_masks, cl_mask_prarms))
+        apply_global_mask(global_model, masks)
 
         if server_round % 1 == 0:
-            # initial_global_params.to(global_model.device)
-            # global_model = global_model.to(global_model.device)
             compare_model(initial_global_params, global_model.state_dict())
 
             pruned_c = 0.0
@@ -276,35 +230,28 @@ def main(args):
             for name in global_model.mask:
                 a = global_model.mask[name].view(-1).to(device='cpu', copy=True).numpy()
                 pruned_c +=sum(np.where(a, 0, 1))
-                total += aggregated_masks[name].numel()
+                total += global_model.mask[name].numel()
             print(f'masked : {pruned_c / total}')
-
-        # t3 = time.time()
-        # print(f'aggregate cost: {t3 - t2}')
-
-        # evaluate performance
-        torch.cuda.empty_cache()
-        for name in global_model.mask:
-            global_model.mask[name] = torch.zeros_like(global_model.mask[name], dtype=torch.float, device=devices[0])
-            # # a = global_model.mask[name].view(-1).to(device='cpu', copy=True).numpy()
-            # # pruned_c +=sum(np.where(a, 0, 1))
-            # total += aggregated_masks[name].numel()
-
+            
         if server_round % args.eval_every == 0:
-            global_model_cp = copy.deepcopy(global_model)
-            if args.prune_at_first_round:
-                global_model_cp.apply_weight_mask()
+            # global_model_cp = copy.deepcopy(global_model)
+            pruned_c = 0.0
+            total = 0.0
+            for name in global_model.mask:
+                a = global_model.mask[name].view(-1).to(device='cpu', copy=True).numpy()
+                pruned_c +=sum(np.where(a, 0, 1))
+                total += global_model.mask[name].numel()
+            print(f'check global_model masked : {pruned_c / total}')
 
-                pruned_c = 0.0
-                total = 0.0
-                for name in global_model_cp.mask:
-                    a = global_model_cp.mask[name].view(-1).to(device='cpu', copy=True).numpy()
-                    pruned_c +=sum(np.where(a, 0, 1))
-                    total += aggregated_masks[name].numel()
-                print(f'check global_model_cp masked : {pruned_c / total}')
-            # if args.prune_at_first_round:
-            #     global_model.apply_weight_mask()
-            train_accuracies, train_losses, test_accuracies, test_losses = evaluate_local(clients, global_model_cp, progress=True,
+            pruned_c = 0.0
+            total = 0.0
+            for name, param in global_model.state_dict().items():
+                a = param.view(-1).to(device='cpu', copy=True).numpy()
+                pruned_c +=sum(np.where(a, 0, 1))
+                total += param.numel()
+            print(f'global model zero params: {pruned_c / total}')
+
+            train_accuracies, train_losses, test_accuracies, test_losses = evaluate_local(clients, global_model, progress=True,
                                                         n_batches=args.test_batches)
             # train_accuracy, train_losses = test_model(global_model_cp, devices[0], clients.train_data)
             wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=server_round)
@@ -322,21 +269,22 @@ def main(args):
             # wandb.log({"Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=server_round)
             # wandb.log({"Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=server_round)
 
+            print('-'*10)
+
+            train_accuracies, train_losses, test_accuracies, test_losses = evaluate_local(clients, None, progress=True,
+                                                        n_batches=args.test_batches)
+            # train_accuracy, train_losses = test_model(global_model_cp, devices[0], clients.train_data)
+            print(f'round: {server_round}')
+            print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
+            # wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=server_round)
+            # wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=server_round)
+
+
+            # test_accuracies, test_loss = test_model(global_model_cp, devices[0], clients.test_data)
+            print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
         # global_params = global_model.state_dict()
 
-        # for client_id in clients:
-        #     i = client_ids.index(client_id)
-        #     # if we didn't send initial global params to any clients in the first round, send them now.
-        #     # (in the real world, this could be implemented as the transmission of
-        #     # a random seed, so the time and place for this is not a concern to us)
-        #     if server_round == 0:
-        #         clients[client_id].initial_global_params = initial_global_params
-
-        # if server_round == 0:
-        #     initial_global_params = deepcopy(global_model.state_dict())
-
-        
-        # wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
+        # global_params = last_params
 
 if __name__ == "__main__":
     # print('????')

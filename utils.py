@@ -250,6 +250,7 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
         for client_id, client in enumerator:
             # client.reset_weights(global_state_dict=global_model.state_dict())
+            # global_model = None
             accuracy, loss = client.test(model=global_model, train_data=True)
             train_accuracies[client_id] = accuracy
             train_losses[client_id] = loss
@@ -296,6 +297,16 @@ def compare_model(model_a, model_b):
         diff_c += sum(np.where(diff.to('cpu', copy=True).view(-1).numpy(), 0, 1))
         total_p += params.numel()
     print(f'non changed: {float(diff_c) / total_p}, total_p: {total_p}, {d1}-{d2}')
+
+def apply_global_mask(net, keep_masks):
+    prunable_layers = filter(
+            lambda layer: isinstance(layer, nn.Conv2d) or isinstance(
+                layer, nn.Linear), net.modules())
+
+    for layer, keep_mask in zip(prunable_layers, keep_masks):
+        assert (layer.weight.shape == keep_mask.shape)
+
+        layer.weight.data[keep_mask == 0.] = 0.
 
 def apply_prune_mask(net, keep_masks):
 

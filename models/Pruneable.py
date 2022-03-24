@@ -214,9 +214,11 @@ class Pruneable(GeneralModel):
         with torch.no_grad():
             for name, tensor in self.named_parameters():
                 if name in self.mask:
-                    tensor.data *= self.mask[name]
-                    if "rho" in name:
-                        tensor.data += (self.mask[name] == 0) * ZERO_SIGMA
+                    # tensor.data *= self.mask[name]
+                    assert tensor.shape == self.mask[name].shape
+                    tensor.data[self.mask[name] == 0.] = 0.
+                    # if "rho" in name:
+                    #     tensor.data += (self.mask[name] == 0) * ZERO_SIGMA
 
     def apply_grad_mask(self):
 

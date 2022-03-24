@@ -8,6 +8,7 @@ from models.criterions.General import General
 from utils import *
 import copy
 import types
+import random
 
 def snip_forward_conv2d(self, x):
         return F.conv2d(x, self.weight * self.weight_mask, self.bias,
@@ -30,6 +31,7 @@ class SNIP(General):
 
     def __init__(self, *args, **kwargs):
         super(SNIP, self).__init__(*args, **kwargs)
+        self.first = True
 
     def get_prune_indices(self, *args, **kwargs):
         raise NotImplementedError
@@ -101,6 +103,14 @@ class SNIP(General):
         for layer in net.modules():
             if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
                 layer.weight_mask = nn.Parameter(torch.ones_like(layer.weight))
+
+                if self.first:
+                    random.seed(0)
+                    np.random.seed(0)
+                    torch.manual_seed(0)
+                    torch.cuda.manual_seed_all(0)
+                    self.first = False
+
                 nn.init.xavier_normal_(layer.weight)
                 layer.weight.requires_grad = False
 
