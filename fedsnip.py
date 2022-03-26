@@ -164,7 +164,6 @@ def main(args):
         if round % args.eval_every == 0:
             server.test_global_model_on_all_client(clients, round)
 
-
 if __name__ == "__main__":
     # print('????')
     args = parser.parse_args()
