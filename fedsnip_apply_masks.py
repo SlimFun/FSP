@@ -30,7 +30,11 @@ from models.models import all_models
 from client import Client
 from utils import *
 import random
+
+from snip_debug.vgg import vgg11_bn
+
 from data_loader import load_partition_data_cifar10
+import json
 
 
 
@@ -88,11 +92,26 @@ torch.cuda.manual_seed_all(0)
 
 rng = np.random.default_rng()
 
+apply_file = 'applyed_masks.txt'
+
 
 class Server:
     def __init__(self, model, device) -> None:
         self.device = device
         self.model = model(self.device)
+
+        self.model.load_state_dict(torch.load('ori_init_model.pt'))
+
+        with open(apply_file, 'r') as f:
+            masks_str = f.readline()
+        #     print(masks_str)
+            masks = json.loads(masks_str)
+            for i in range(len(masks)):
+                masks[i] = torch.from_numpy(np.asarray(masks[i]))
+        
+        self.masks = masks
+        self._prune_global_model(self.masks)
+
 
     def get_global_params(self):
         return self.model.cpu().state_dict()
@@ -111,9 +130,9 @@ class Server:
         #     for j in range(1, len(keep_masks_dict.keys())):
         #         # params = self.keep_masks_dict[0][j].to('cpu')
         #         keep_masks_dict[0][i] += keep_masks_dict[j][i]
-        #         # if j == len(self.keep_masks_dict.keys())-1:
-        #         #     diff = self.keep_masks_dict[0][i].view(-1).cpu().numpy()
-        #         #     self.keep_masks_dict[0][i] = np.where(diff, 0, 1)
+        #         if j == len(self.keep_masks_dict.keys())-1:
+        #             diff = self.keep_masks_dict[0][i].view(-1).cpu().numpy()
+        #             self.keep_masks_dict[0][i] = np.where(diff, 0, 1)
         return keep_masks_dict[0]
 
     def _prune_global_model(self, masks):
@@ -132,7 +151,7 @@ class Server:
         training_num = sum(local_train_num for (local_train_num, _) in model_list)
 
         (num0, averaged_params) = model_list[0]
-        if (averaged_params is not None) and (round != 0):
+        if (averaged_params is not None):
             for k in averaged_params.keys():
                 for i in range(0, len(model_list)):
                     local_sample_number, local_model_params = model_list[i]
@@ -147,14 +166,36 @@ class Server:
             # for name, param in averaged_params.items():
             for name in last_params:
                 assert (last_params[name].shape == averaged_params[name].shape)
-                last_params[name] = last_params[name].type_as(averaged_params[name])
+                if (averaged_params[name].dtype != last_params[name].dtype):
+                    print(name)
+                    print(averaged_params[name].dtype)
+                    print(last_params[name].dtype)
+                averaged_params[name] = averaged_params[name].type_as(last_params[name])
+                # last_params[name] = last_params[name].type_as(averaged_params[name])
                 last_params[name] += averaged_params[name]
             self.set_global_params(last_params)
 
-        if keep_masks_dict[0] is not None:
-            masks = self._merge_local_masks(keep_masks_dict)
+        # if keep_masks_dict[0] is not None:
+        #     masks = self._merge_local_masks(keep_masks_dict)
 
-            self._prune_global_model(masks)
+        # if self.
+        # with open(apply_file, 'r') as f:
+        #     masks_str = f.readline()
+        # #     print(masks_str)
+        #     masks = json.loads(masks_str)
+        #     for i in range(len(masks)):
+        #         masks[i] = torch.from_numpy(np.asarray(masks[i]))
+
+        self._prune_global_model(self.masks)
+
+        # self._prune_global_model(masks)
+
+        #     applyed_masks = copy.deepcopy(masks)
+        #     for i in range(len(applyed_masks)):
+        #         applyed_masks[i] = applyed_masks[i].cpu().numpy().tolist()
+        #     with open(f'./applyed_masks.txt', 'a+') as f:
+        #         f.write(json.dumps(applyed_masks))
+        #         f.write('\n')
 
     def test_global_model_on_all_client(self, clients, round):
         # pruned_c = 0.0
@@ -166,7 +207,7 @@ class Server:
         # print(f'global model zero params: {pruned_c / total}')
 
         train_accuracies, train_losses, test_accuracies, test_losses = evaluate_local(clients, self.model, progress=True,
-                                                    n_batches=args.test_batches)
+                                                    n_batches=0)
         wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=round)
         wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=round)
         print(f'round: {round}')
@@ -219,14 +260,20 @@ def main(args):
             )
     
     for i in range(args.total_clients):
-        cl = Client(id=i, device=devices[0], train_data=train_data_local_dict[i], test_data=test_data_local_dict[i], net=all_models[args.model],
+        cl = Client(id=i, device=devices[0], train_data=train_data_local_dict[i], test_data=test_data_local_dict[i], net=vgg11_bn,
                     learning_rate=args.eta, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
                     
         clients[i] = cl
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    server = Server(all_models[args.model], devices[0])
+    # server = Server(all_models[args.model], devices[0])
+    server = Server(vgg11_bn, devices[0])
+
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
 
     # server.init_global_model()
     for round in range(args.rounds):
@@ -248,9 +295,10 @@ def main(args):
             # print(client.train_size)
             model_list.append((client.train_size, cl_params))
 
-        # yield DebugInfo('', (model_list, server))
 
         server.aggregate(keep_masks_dict, model_list, round)
+
+        # yield DebugInfo('', (model_list, server))
 
         if round % args.eval_every == 0:
             server.test_global_model_on_all_client(clients, round)

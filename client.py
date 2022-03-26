@@ -86,17 +86,6 @@ class Client:
     def reset_weights(self, global_state_dict):
         self.net.load_state_dict(global_state_dict)
 
-    # def reset_weights(self, *args, **kwargs):
-    #     return self.net.reset_weights(*args, **kwargs)
-    # def reset_weights_and_mask(self, global_state_dict):
-    #     self.net.load_state_dict(global_state_dict)
-
-    #     self.net.rebuild_mask()
-
-
-    # def sparsity(self, *args, **kwargs):
-    #     return self.net.sparsity(*args, **kwargs)
-
 
     def _get_train_size(self):
         return sum(len(x) for x in self.train_data)
@@ -113,7 +102,7 @@ class Client:
     def get_net_params(self):
         return self.net.cpu().state_dict()
 
-    def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False):
+    def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False, test_on_each_round=False, clip_grad=False):
         '''Train the client network for a single round.'''
 
         dl_cost = 0
@@ -138,7 +127,7 @@ class Client:
             #     dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
         # self.init_model()
 
-        self.net.to(self.device)
+        
         
         handlers = None
         if self.prune_strategy == 'SNIP':
@@ -146,22 +135,36 @@ class Client:
                 print(f'client: {self.id} **************')
             
                 self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
-                handlers = apply_prune_mask(self.net, self.keep_masks)
                 self.pruned = True
                 # self.record_keep_masks(keep_masks)
 
                 if single_shot_pruning:
                     ret = dict(state=None, running_loss=None, mask=self.keep_masks)
+                    # handlers = apply_prune_mask(self.net, self.keep_masks)
                     return ret
+
+                handlers = apply_prune_mask(self.net, self.keep_masks)
 
         init_params = copy.deepcopy(self.get_net_params())
 
-        print('**********test before train*************')
-        accuracy, loss = self.test(self.net, train_data=True)
-        print(f'accuracy: {accuracy}; loss: {loss}')
-        print('**********test before train*************')
 
+        if test_on_each_round:
+            print('**********test before train*************')
 
+            pruned_c = 0.0
+            total = 0.0
+
+            for name, param in self.net.state_dict().items():
+                a = param.view(-1).to(device='cpu', copy=True).numpy()
+                pruned_c +=sum(np.where(a, 0, 1))
+                total += param.numel()
+            print(f'global model zero params: {pruned_c / total}')
+
+            accuracy, loss = self.test(self.net, train_data=True)
+            print(f'accuracy: {accuracy}; loss: {loss}')
+            print('**********test before train*************')
+
+        self.net.to(self.device)
         total = 0.
         for epoch in range(self.local_epochs):
             # break
@@ -186,7 +189,8 @@ class Client:
                 #     loss += args.prox / 2. * self.net.proximal_loss(global_params)
                 loss.backward()
 
-                # torch.nn.utils.clip_grad_norm_(self.net.parameters(), 10.0)
+                if clip_grad:
+                    torch.nn.utils.clip_grad_norm_(self.net.parameters(), 10.0)
 
                 self.optimizer.step()
                 total += len(labels)
@@ -203,7 +207,7 @@ class Client:
             self.curr_epoch += 1
         print('total: ', total)
 
-        finish_params = self.get_net_params()
+        finish_params = copy.deepcopy(self.get_net_params())
         for param_tensor in finish_params:
             finish_params[param_tensor] -= init_params[param_tensor]
 
@@ -221,23 +225,12 @@ class Client:
         model - model to evaluate, or this client's model if None
         n_batches - number of minibatches to test on, or 0 for all of them
         '''
-        
-
-        # local_mask = copy.deepcopy(self.net.mask)
 
         if model is None:
             model = self.net
             _model = self.net
         else:
             _model = model.to(self.device)
-            # pruned_c = 0.0
-            # total = 0.0
-            # for name, param in _model.state_dict().items():
-            #     a = param.view(-1).to(device='cpu', copy=True).numpy()
-            #     pruned_c +=sum(np.where(a, 0, 1))
-            #     total += param.numel()
-            # print(f'test global model: {pruned_c / total}')
-            # apply_global_mask(_model, self.keep_masks)
 
         correct = 0.
         total = 0.
@@ -245,15 +238,11 @@ class Client:
 
         _model.eval()
         data_loader = self.train_data if train_data else self.test_data
-        # _model.mask = local_mask
-        # _model.apply_weight_mask()
+        
         with torch.no_grad():
             for i, (inputs, labels) in enumerate(data_loader):
                 if i > n_batches and n_batches > 0:
                     break
-                # if not args.cache_test_set_gpu:
-                #     inputs = inputs.to(self.device)
-                #     labels = labels.to(self.device)
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
                 outputs = _model(inputs)
