@@ -1,4 +1,3 @@
-from email import utils
 from logging import handlers
 import torch
 import torch.cuda
@@ -17,7 +16,7 @@ import models.models as models
 # from snip import SNIP
 import SNIP
 import snip
-from utils import apply_global_mask, apply_prune_mask, compare_model
+from utils import apply_global_mask, apply_prune_mask, compare_model, count_model_zero_params, apply_grad_mask
 import wandb
 
 import random
@@ -70,7 +69,7 @@ class Client:
         self.initial_global_params = None
 
         self.train_size = self._get_train_size()
-        self.keep_masks = None
+        # self.keep_masks = None
 
 
     def init_model(self):
@@ -80,6 +79,7 @@ class Client:
 
     def reset_optimizer(self):
         self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.net.parameters()), lr=self.learning_rate, momentum=0.9, weight_decay=1e-5)
+        # self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.net.parameters()), lr=self.learning_rate)
         # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=self.learning_rate, momentum=self.momentum, weight_decay=self.weight_decay)
 
 
@@ -107,6 +107,30 @@ class Client:
 
         dl_cost = 0
 
+        handlers = None
+        if self.prune_strategy == 'SNIP':
+            if not (self.prune_at_first_round and self.pruned):
+                print(f'client: {self.id} **************')
+            
+                # self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
+                prune_criterion = SNIP.SNIP(model=self.net, device=self.device)
+                prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data)
+                self.pruned = True
+                # self.record_keep_masks(keep_masks)
+
+                self.net.mask = [m for m in self.net.mask.values()]
+
+                if single_shot_pruning:
+                    ret = dict(state=None, running_loss=None, mask=self.net.mask)
+                    # handlers = apply_prune_mask(self.net, self.net.mask)
+                    return ret
+
+                # handlers = apply_prune_mask(self.net, self.net.mask)
+
+                
+            handlers = apply_grad_mask(self.net, self.net.mask)
+
+        
         if global_params:
             # this is a FedAvg-like algorithm, where we need to reset
             # the client's weights every round
@@ -115,50 +139,13 @@ class Client:
             # Try to reset the optimizer state.
             self.reset_optimizer()
 
-            # if mask_changed:
-            #     dl_cost += self.net.mask_size # need to receive mask
-
-            # if not self.initial_global_params:
-            #     self.initial_global_params = initial_global_params
-            #     # no DL cost here: we assume that these are transmitted as a random seed
-            # else:
-            #     # otherwise, there is a DL cost: we need to receive all parameters masked '1' and
-            #     # all parameters that don't have a mask (e.g. biases in this case)
-            #     dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
-        # self.init_model()
-
-        
-        
-        handlers = None
-        if self.prune_strategy == 'SNIP':
-            if not (self.prune_at_first_round and self.pruned):
-                print(f'client: {self.id} **************')
-            
-                self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
-                self.pruned = True
-                # self.record_keep_masks(keep_masks)
-
-                if single_shot_pruning:
-                    ret = dict(state=None, running_loss=None, mask=self.keep_masks)
-                    # handlers = apply_prune_mask(self.net, self.keep_masks)
-                    return ret
-
-                handlers = apply_prune_mask(self.net, self.keep_masks)
-
         init_params = copy.deepcopy(self.get_net_params())
 
 
         if test_on_each_round:
             print('**********test before train*************')
-
-            pruned_c = 0.0
-            total = 0.0
-
-            for name, param in self.net.state_dict().items():
-                a = param.view(-1).to(device='cpu', copy=True).numpy()
-                pruned_c +=sum(np.where(a, 0, 1))
-                total += param.numel()
-            print(f'global model zero params: {pruned_c / total}')
+            zero_params_num = count_model_zero_params(self.net.state_dict())
+            print(f'global model zero params: {zero_params_num}')
 
             accuracy, loss = self.test(self.net, train_data=True)
             print(f'accuracy: {accuracy}; loss: {loss}')
@@ -198,7 +185,7 @@ class Client:
                 #     self.net.apply_weight_mask()
 
                 running_loss += loss.item()
-                # if i >= 5:
+                # if i >= 5: 
                 # break
 
             print(f'running loss: {running_loss / len(self.train_data)}')
@@ -211,11 +198,14 @@ class Client:
         for param_tensor in finish_params:
             finish_params[param_tensor] -= init_params[param_tensor]
 
+        zero_params_num = count_model_zero_params(finish_params)
+        print(f'client {self.id} finish params zeros: {zero_params_num}')
+
         if handlers is not None:
             for h in handlers:
                 h.remove()
         
-        ret = dict(state=finish_params, running_loss=None, mask=self.keep_masks)
+        ret = dict(state=finish_params, running_loss=None, mask=self.net.mask)
 
         return ret
 

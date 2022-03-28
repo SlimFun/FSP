@@ -133,7 +133,6 @@ def main(args):
 
     server = Server(all_models[args.model], devices[0])
     # server = Server(vgg11_bn, devices[0])
-    # server = Server(vgg11_bn, devices[0])
 
     # server.init_global_model()
     for round in range(args.rounds):
@@ -148,6 +147,7 @@ def main(args):
             train_result = client.train(global_params=global_params,
                                         sparsity=1-args.keep_ratio,
                                         single_shot_pruning=args.single_shot_pruning,
+                                        test_on_each_round=True,
                                         clip_grad=args.clip_grad)
             cl_params = train_result['state']
             cl_mask_prarms = train_result['mask']

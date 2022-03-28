@@ -308,6 +308,17 @@ def apply_global_mask(net, keep_masks):
 
         layer.weight.data[keep_mask == 0.] = 0.
 
+def count_model_zero_params(params):
+    zero_c = 0.0
+    total = 0.0
+
+    for name, param in params.items():
+        a = param.view(-1).to(device='cpu', copy=True).numpy()
+        zero_c +=sum(np.where(a, 0, 1))
+        total += param.numel()
+
+    return zero_c / total
+
 def apply_prune_mask(net, keep_masks):
 
     # Before I can zip() layers and pruning masks I need to make sure they match
@@ -339,6 +350,41 @@ def apply_prune_mask(net, keep_masks):
         # Step 1: Set the masked weights to zero (NB the biases are ignored)
         # Step 2: Make sure their gradients remain zero
         layer.weight.data[keep_mask == 0.] = 0.
+        # layer.weight.register_hook(hook_factory(keep_mask))
+        handles.append(layer.weight.register_hook(hook_factory(keep_mask)))
+
+    return handles
+
+def apply_grad_mask(net, keep_masks):
+    # print('apply grad mask')
+    # Before I can zip() layers and pruning masks I need to make sure they match
+    # one-to-one by removing all the irrelevant modules:
+    prunable_layers = filter(
+        lambda layer: isinstance(layer, nn.Conv2d) or isinstance(
+            layer, nn.Linear), net.modules())
+
+    handles = []
+
+    for layer, keep_mask in zip(prunable_layers, keep_masks):
+        assert (layer.weight.shape == keep_mask.shape)
+        # print(layer.weight.shape)
+
+        def hook_factory(keep_mask):
+            """
+            The hook function can't be defined directly here because of Python's
+            late binding which would result in all hooks getting the very last
+            mask! Getting it through another function forces early binding.
+            """
+
+            def hook(grads):
+                return grads * keep_mask
+
+            return hook
+
+        # mask[i] == 0 --> Prune parameter
+        # mask[i] == 1 --> Keep parameter
+
+        # layer.weight.data[keep_mask == 0.] = 0.
         # layer.weight.register_hook(hook_factory(keep_mask))
         handles.append(layer.weight.register_hook(hook_factory(keep_mask)))
 

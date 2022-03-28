@@ -39,7 +39,7 @@ class SNIP(General):
     def get_grow_indices(self, *args, **kwargs):
         raise NotImplementedError
 
-    def prune(self, percentage, train_loader=None, manager=None, **kwargs):
+    def prune_masks(self, percentage, train_loader=None, manager=None, **kwargs):
 
         all_scores, grads_abs, log10, norm_factor = self.get_weight_saliencies(train_loader)
 
@@ -83,10 +83,10 @@ class SNIP(General):
             cutoff = (self.model.mask[name] == 0).sum().item()
 
             print("pruning", cutoff, "percentage", cutoff / length_nonzero, "length_nonzero", length_nonzero)
-        self.model.apply_weight_mask()
+        # self.model.apply_weight_mask()
         # self.model.apply_mask()
         print("final percentage after snip:", self.model.pruned_percentage)
-        self.cut_lonely_connections()
+        # self.cut_lonely_connections()
 
     def get_weight_saliencies(self, train_loader):
 
@@ -132,7 +132,7 @@ class SNIP(General):
         for name, layer in net.named_modules():
             if "Norm" in str(layer): continue
             if name + ".weight" in self.model.mask:
-                grads_abs[name + ".weight"] = torch.abs(layer.weight_mask.grad)
+                grads_abs[name + ".weight"] = copy.deepcopy(torch.abs(layer.weight_mask.grad))
         # for layer in net.modules():
         #     if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
         #         grads_abs.append(torch.abs(layer.weight_mask.grad))
