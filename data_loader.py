@@ -6,6 +6,8 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR10
 
+import torchvision
+
 import json
 
 # from .datasets import CIFAR10_truncated
@@ -147,14 +149,14 @@ def _data_transforms_cifar10():
     CIFAR_STD = [0.24703233, 0.24348505, 0.26158768]
 
     train_transform = transforms.Compose([
-        transforms.ToPILImage(),
+        # transforms.ToPILImage(),
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
     ])
 
-    train_transform.transforms.append(Cutout(16))
+    # train_transform.transforms.append(Cutout(16))
 
     valid_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -167,11 +169,13 @@ def _data_transforms_cifar10():
 def load_cifar10_data(datadir):
     train_transform, test_transform = _data_transforms_cifar10()
 
-    cifar10_train_ds = CIFAR10_truncated(datadir, train=True, download=True, transform=train_transform)
-    cifar10_test_ds = CIFAR10_truncated(datadir, train=False, download=True, transform=test_transform)
+    # cifar10_train_ds = CIFAR10_truncated(datadir, train=True, download=True, transform=train_transform)
+    # cifar10_test_ds = CIFAR10_truncated(datadir, train=False, download=True, transform=test_transform)
+    train = torchvision.datasets.CIFAR10(datadir, train=True, download=True, transform=train_transform)
+    test = torchvision.datasets.CIFAR10(datadir, train=False, download=True, transform=test_transform)
 
-    X_train, y_train = cifar10_train_ds.data, cifar10_train_ds.target
-    X_test, y_test = cifar10_test_ds.data, cifar10_test_ds.target
+    X_train, y_train = train.data, np.array(train.targets)
+    X_test, y_test = test.data, np.array(test.targets)
 
     return (X_train, y_train, X_test, y_test)
 
@@ -187,12 +191,6 @@ def partition_data(dataset, datadir, partition, n_nets, alpha):
         idxs = np.random.permutation(total_num)
         batch_idxs = np.array_split(idxs, n_nets)
         net_dataidx_map = {i: batch_idxs[i] for i in range(n_nets)}
-
-        test_num = X_test.shape[0]
-        print(str(test_num) + '******************')
-        test_idx = np.random.permutation(test_num)
-        test_idx = np.array(np.array_split(test_idx, n_nets))
-        net_testidx_map = {i: test_idx[i] for i in range(n_nets)}
 
     elif partition == "hetero":
         min_size = 0
@@ -229,6 +227,13 @@ def partition_data(dataset, datadir, partition, n_nets, alpha):
     else:
         traindata_cls_counts = record_net_data_stats(y_train, net_dataidx_map)
 
+    
+    test_num = X_test.shape[0]
+    print(str(test_num) + '******************')
+    test_idx = np.random.permutation(test_num)
+    test_idx = np.array(np.array_split(test_idx, n_nets))
+    net_testidx_map = {i: test_idx[i] for i in range(n_nets)}
+
     return X_train, y_train, X_test, y_test, net_dataidx_map, traindata_cls_counts, net_testidx_map
 
 
@@ -243,17 +248,20 @@ def get_dataloader_test(dataset, datadir, train_bs, test_bs, dataidxs_train, dat
 
 
 def get_dataloader_CIFAR10(datadir, train_bs, test_bs, dataidxs=None, testidx=None):
-    dl_obj = CIFAR10_truncated
+    # dl_obj = CIFAR10_truncated
+    dl_obj = torchvision.datasets.CIFAR10
 
     transform_train, transform_test = _data_transforms_cifar10()
 
-    train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
-    test_ds = dl_obj(datadir, dataidxs=testidx, train=False, transform=transform_test, download=True)
+    train_ds = dl_obj(datadir, train=True, transform=transform_train, download=True)
+    test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
 
     logging.info(f'seed: {torch.initial_seed()}!!!!!!!')
 
-    train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True)
-    test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
+    train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, sampler=dataidxs, num_workers=2,
+        pin_memory=False)
+    test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, sampler=testidx, num_workers=2,
+        pin_memory=False)
 
     return train_dl, test_dl
 

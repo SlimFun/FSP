@@ -5,6 +5,8 @@ import torch.cuda
 import torch.nn as nn
 import torch.nn.functional as F
 
+import warnings
+
 from .vgg import VGG_SNIP, vgg11_bn
 from .Pruneable import Pruneable
 
@@ -36,8 +38,56 @@ class CNN2(Pruneable):
         
         return x
 
+class CIFAR10Net(Pruneable):
+
+    def __init__(self, *args, **kwargs):
+        super(CIFAR10Net, self).__init__(*args, **kwargs)
+
+        self.conv1 = self.Conv2d(3, 6, 5)
+        self.conv2 = self.Conv2d(6, 16, 5)
+
+        self.fc1 = self.Linear(16 * 20 * 20, 120)
+        self.fc2 = self.Linear(120, 84)
+        self.fc3 = self.Linear(84, 10)
+
+        self.init_param_sizes()
+
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 3, stride=1))
+        x = F.relu(F.max_pool2d(self.conv2(x), 3, stride=1))
+        x = x.view(-1, self.num_flat_features(x))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.softmax(self.fc3(x), dim=1)
+        return x
+
+def needs_mask(name):
+    return name.endswith('weight')
+
+def initialize_mask(model, dtype=torch.bool):
+    layers_to_prune = (layer for _, layer in model.named_children())
+    for layer in layers_to_prune:
+        for name, param in layer.named_parameters():
+            if name.endswith('weight'):
+                if hasattr(layer, name + '_mask'):
+                    warnings.warn(
+                        'Parameter has a pruning mask already. '
+                        'Reinitialize to an all-one mask.'
+                    )
+                name = name.replace('.', '_')
+                layer.register_buffer(name + '_mask', torch.ones_like(param, dtype=dtype))
+                continue
+                parent = name[:name.rfind('.')]
+
+                for mname, module in layer.named_modules():
+                    if mname != parent:
+                        continue
+                    module.register_buffer(name[name.rfind('.')+1:] + '_mask', torch.ones_like(param, dtype=dtype))
+
 all_models = {
         'CNNNet': CNN2,
         'VGG_SNIP': VGG_SNIP,
-        'VGG11_BN': vgg11_bn
+        'VGG11_BN': vgg11_bn,
+        'CIFAR10Net': CIFAR10Net
 }

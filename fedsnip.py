@@ -1,4 +1,5 @@
 from email import utils
+from pydoc import cli
 from tkinter import N
 
 from scipy import test
@@ -60,7 +61,7 @@ parser.add_argument('--prox', type=float, default=0, help='coefficient to proxim
 
 parser.add_argument('--batch-size', type=int, default=32,
                     help='local client batch size')
-parser.add_argument('--l2', default=0.001, type=float, help='L2 regularization strength')
+parser.add_argument('--l2', default=1e-5, type=float, help='L2 regularization strength')
 parser.add_argument('--momentum', default=0.9, type=float, help='Local client SGD momentum parameter')
 parser.add_argument('--cache-test-set', default=False, action='store_true', help='Load test sets into memory')
 parser.add_argument('--cache-test-set-gpu', default=False, action='store_true', help='Load test sets into GPU memory')
@@ -72,10 +73,10 @@ parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileT
 
 parser.add_argument('--clip_grad', default=False, action='store_true', dest='clip_grad')
 
-parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet'),
+parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net'),
                     default='VGG11_BN', help='Dataset to use')
 
-parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP'),
+parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP'),
                     default='None', help='Dataset to use')
 parser.add_argument('--prune_at_first_round', default=False, action='store_true', dest='prune_at_first_round')
 parser.add_argument('--keep_ratio', type=float, default=0.0,
@@ -93,6 +94,12 @@ torch.cuda.manual_seed_all(0)
 
 rng = np.random.default_rng()
 
+def print2(*arg, **kwargs):
+    print(*arg, **kwargs, file=args.outfile)
+    print(*arg, **kwargs)
+
+def print_csv_line(**kwargs):
+    print2(','.join(str(x) for x in kwargs.values()))
 
 def main(args):
     
@@ -125,14 +132,18 @@ def main(args):
     
     for i in range(args.total_clients):
         cl = Client(id=i, device=devices[0], train_data=train_data_local_dict[i], test_data=test_data_local_dict[i], net=all_models[args.model],
-                    learning_rate=args.eta, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
+                    learning_rate=args.eta, momentum=args.momentum, weight_decay=args.l2, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
                     
         clients[i] = cl
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    server = Server(all_models[args.model], devices[0])
+    server = Server(all_models[args.model], devices[0], train_data_local_dict[0])
     # server = Server(vgg11_bn, devices[0])
+    print(f'server model param size: {server.model.param_size}')
+    compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
+    download_cost = np.zeros(len(clients))
+    upload_cost = np.zeros(len(clients))
 
     # server.init_global_model()
     for round in range(args.rounds):
@@ -144,25 +155,57 @@ def main(args):
         for client_id in client_indices:
             client = clients[client_id]
 
+            t0 = time.time()
+            if (round == 1) and (args.prune_strategy == 'SNAP'):
+                del client.net
+                torch.cuda.empty_cache()
+                client.net = copy.deepcopy(server.model)
             train_result = client.train(global_params=global_params,
                                         sparsity=1-args.keep_ratio,
                                         single_shot_pruning=args.single_shot_pruning,
                                         test_on_each_round=True,
-                                        clip_grad=args.clip_grad)
+                                        clip_grad=args.clip_grad,
+                                        global_sparsity=server.model.sparsity_percentage())
             cl_params = train_result['state']
             cl_mask_prarms = train_result['mask']
+            download_cost[client_id] = train_result['dl_cost']
+            upload_cost[client_id] = train_result['ul_cost']
+            compute_times[client_id] = time.time() - t0
 
             keep_masks_dict[client_id] = cl_mask_prarms
             # print(client.train_size)
             model_list.append((client.train_size, cl_params))
 
 
-        server.aggregate(keep_masks_dict, model_list, round)
+        server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost)
 
         # yield DebugInfo('', (model_list, server))
 
         if round % args.eval_every == 0:
-            server.test_global_model_on_all_client(clients, round)
+            train_accuracies, test_accuracies = server.test_global_model_on_all_client(clients, round)
+            # for client_id in clients:
+            #     print_csv_line(pid=args.pid,
+            #                 dataset=args.dataset,
+            #                 clients=args.clients,
+            #                 total_clients=len(clients),
+            #                 round=round,
+            #                 batch_size=args.batch_size,
+            #                 epochs=args.epochs,
+            #                 target_sparsity=server.model.sparsity_percentage(),
+            #                 pruning_rate=0,
+            #                 initial_pruning_threshold='',
+            #                 final_pruning_threshold='',
+            #                 pruning_threshold_growth_method='',
+            #                 pruning_method='',
+            #                 lth=False,
+            #                 client_id=client_id,
+            #                 accuracy=test_accuracies[client_id],
+            #                 sparsity=0,
+            #                 compute_time=compute_times[client_id],
+            #                 download_cost=download_cost[client_id],
+            #                 upload_cost=upload_cost[client_id])
+            print(f'download cost: {download_cost}')
+            print(f'upload cost: {upload_cost}')
 
 if __name__ == "__main__":
     # print('????')

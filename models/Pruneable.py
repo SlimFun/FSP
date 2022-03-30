@@ -50,6 +50,48 @@ class Pruneable(GeneralModel):
         super(Pruneable, self).__init__(device=device, **kwargs)
         self.criterion = criterion
 
+
+    def num_flat_features(self, x):
+        size = x.size()[1:]  # all dimensions except the batch dimension
+        num_features = 1
+        for s in size:
+            num_features *= s
+        return num_features
+
+    # @property
+    def mask_size(self):
+        mask_size = 0.
+        if isinstance(self.mask, dict):
+            masks = self.mask.values()
+        elif isinstance(self.mask, list):
+            masks = self.mask
+        for mask in masks:
+            mask_size += mask.numel()
+        return mask_size
+
+    # @property
+    def sparsity_percentage(self):
+        if isinstance(self.mask, dict):
+            masks = self.mask.values()
+        elif isinstance(self.mask, list):
+            masks = self.mask
+        zero_c = 0.
+        total = 0.
+        for m in masks:
+            a = m.view(-1).to(device='cpu', copy=True)
+            a = torch.where(a>=1, 1, 0)
+            zero_c +=sum(np.where(a.numpy(), 0, 1))
+            total += m.numel()
+        return zero_c/total
+
+    def init_param_sizes(self):
+        # bits required to transmit mask and parameters?
+        self.param_size = 0
+        for _, layer in self.named_children():
+            for name, param in layer.named_parameters():
+                param_size = np.prod(param.size())
+                self.param_size += param_size * 32 # FIXME: param.dtype.size?
+
     def get_num_nodes(self, init=False):
         counter = 0
         addition = 0

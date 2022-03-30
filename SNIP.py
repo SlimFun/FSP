@@ -85,7 +85,7 @@ class SNIP(General):
             print("pruning", cutoff, "percentage", cutoff / length_nonzero, "length_nonzero", length_nonzero)
         # self.model.apply_weight_mask()
         # self.model.apply_mask()
-        print("final percentage after snip:", self.model.pruned_percentage)
+        print("final percentage after snip:", self.model.sparsity_percentage())
         # self.cut_lonely_connections()
 
     def get_weight_saliencies(self, train_loader):

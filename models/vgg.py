@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from .Pruneable import Pruneable
+from models.networks.assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
 
 
 __all__ = [
@@ -32,16 +33,27 @@ class VGG(Pruneable):
             # nn.ReLU(True),
             # nn.Dropout(),
             # nn.Linear(4096, num_classes),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 512),
+            # nn.BatchNorm1d(512),
+            # self.Linear(512, 512),
+            # nn.ReLU(True),
+            # nn.BatchNorm1d(512),
+            # self.Linear(512, 512),
+            # nn.ReLU(True),
+            # self.Linear(512, 10),
+            self.Linear(512, 512),  # 512 * 7 * 7 in the original VGG
+            # nn.LeakyReLU(leak, True),
             nn.ReLU(True),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),  # instead of dropout
+            self.Linear(512, 512),
+            # nn.LeakyReLU(leak, True),
             nn.ReLU(True),
-            nn.Linear(512, 10),
+            nn.BatchNorm1d(512),  # instead of dropout
+            self.Linear(512, num_classes),
         )
         if init_weights:
             self._initialize_weights()
+
+        self.init_param_sizes()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
@@ -58,14 +70,14 @@ class VGG(Pruneable):
         #         m.weight.data.normal_(0, math.sqrt(2. / n))
         #         m.bias.data.zero_()
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, self.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
+            elif isinstance(m, self.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
 
@@ -93,7 +105,7 @@ def make_layers(cfg, batch_norm=False):
         if v == 'M':
             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
         else:
-            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            conv2d = ContainerConv2d(in_channels, v, kernel_size=3, padding=1)
             if batch_norm:
                 layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
             else:

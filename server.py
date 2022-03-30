@@ -1,13 +1,22 @@
+import copy
 from torch import nn
 import utils
+from collections import Counter
+import numpy as np
+import torch
+import SNAP
 
 import wandb
 
 class Server:
-    def __init__(self, model, device) -> None:
+    def __init__(self, model, device, train_data=None) -> None:
         self.device = device
-        self.model = model(self.device)
+        self.model = model(self.device).to(self.device)
         self.masks = None
+        self.train_data = train_data
+        self.pruned = False
+
+        self.transmission_cost = 0.
 
         # torch.save(self.model.state_dict(), 'ori_init_model.pt')
 
@@ -32,6 +41,33 @@ class Server:
         #         if j == len(self.keep_masks_dict.keys())-1:
         #             diff = self.keep_masks_dict[0][i].view(-1).cpu().numpy()
         #             self.keep_masks_dict[0][i] = np.where(diff, 0, 1)
+        # print(f'Counter : {Counter(keep_masks_dict[0])}')
+        # zero_c = 0.
+        # total = 0.
+
+        # for m in keep_masks_dict[0]:
+        #     print(m.shape)
+        #     a = m.view(-1).to(device='cpu', copy=True)
+        #     # zero_c +=sum(np.where(a, 0, 1))
+        #     a = torch.where(a>=4, 1, 0)
+        #     zero_c +=sum(np.where(a.numpy(), 0, 1))
+        #     total += m.numel()
+
+        # print(f'zeros: {zero_c / total}, zero_c: {zero_c}; total: {total}')
+        # 1/0
+
+        # for i in range(len(keep_masks_dict[0])):
+        #     keep_masks_dict[0][i] = torch.where(keep_masks_dict[0][i]>=6, 1, 0)
+
+
+        # zero_c = 0.
+        # total = 0.
+        # for m in keep_masks_dict[0]:
+        #     a = m.view(-1).to(device='cpu', copy=True).numpy()
+        #     zero_c +=sum(np.where(a, 0, 1))
+        #     total += m.numel()
+        # print(f'global zeros: {zero_c / total}, zero_c: {zero_c}; total: {total}')
+        
         return keep_masks_dict[0]
 
     def _prune_global_model(self, masks):
@@ -44,7 +80,14 @@ class Server:
 
             layer.weight.data[keep_mask == 0.] = 0.
 
-    def aggregate(self, keep_masks_dict, model_list, round):
+    def round_trans_cost(self, download_cost, upload_cost):
+        trans_cost = 0.
+        for c in range(len(download_cost)):
+            trans_cost += (download_cost[c] + upload_cost[c]) / (1024 * 1024)
+        return trans_cost
+
+    def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost):
+        self.transmission_cost += int(self.round_trans_cost(download_cost, upload_cost))
         last_params = self.get_global_params()
 
         training_num = sum(local_train_num for (local_train_num, _) in model_list)
@@ -68,9 +111,11 @@ class Server:
                 last_params[name] += averaged_params[name]
             self.set_global_params(last_params)
 
+        # print(f'keep masks dict[0]: {keep_masks_dict[0]}')
         if (keep_masks_dict[0] is not None):
             if self.masks is None:
                 self.masks = self._merge_local_masks(keep_masks_dict)
+                # self.model.mask = self.masks
 
             # applyed_masks = copy.deepcopy(self.masks)
             # for i in range(len(applyed_masks)):
@@ -78,8 +123,15 @@ class Server:
             # with open(f'./applyed_masks.txt', 'a+') as f:
             #     f.write(json.dumps(applyed_masks))
             #     f.write('\n')
-
-            self._prune_global_model(self.masks)
+            strategy = 'SNIP'
+            if strategy == 'SNIP':
+                self._prune_global_model(self.masks)
+            else:
+                if not self.pruned:
+                    # self.model = self.model.to(self.device)
+                    SNAP.SNAP(model=self.model, device=self.device).prune_global_model(self.masks, self.train_data)
+                    self.pruned = True
+            self.model.mask = self.masks
         
 
     def test_global_model_on_all_client(self, clients, round):
@@ -93,12 +145,23 @@ class Server:
 
         train_accuracies, train_losses, test_accuracies, test_losses = utils.evaluate_local(clients, self.model, progress=True,
                                                     n_batches=0)
-        wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=round)
-        wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=round)
+        # wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=round)
+        # wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=round)
+        # print(f'round: {round}')
+        # print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
+
+        # wandb.log({"Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=round)
+        # wandb.log({"Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=round)
+        # print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
+
+        wandb.log({"Trans_Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=int(self.transmission_cost))
+        wandb.log({"Trans_Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=int(self.transmission_cost))
         print(f'round: {round}')
         print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
 
-        wandb.log({"Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=round)
-        wandb.log({"Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=round)
+        wandb.log({"Trans_Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=int(self.transmission_cost))
+        wandb.log({"Trans_Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=int(self.transmission_cost))
         print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
+
+        return train_accuracies, test_accuracies
 
