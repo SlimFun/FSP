@@ -144,7 +144,7 @@ class Client:
                 self.net.mask = neural_masks
                 ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size() * 32
 
-                ret = dict(state=None, running_loss=None, mask=neural_masks, ul_cost=0., dl_cost=0.)
+                ret = dict(state=None, running_loss=None, mask=neural_masks, ul_cost=ul_cost, dl_cost=dl_cost)
                 self.pruned = True
                 return ret
             self.net.init_param_sizes()
@@ -231,6 +231,8 @@ class Client:
         if self.prune_strategy == 'SNIP':
             ul_cost += (1-self.net.sparsity_percentage()) * self.net.param_size
         elif self.prune_strategy == 'None':
+            ul_cost += self.net.param_size
+        elif self.prune_strategy == 'SNAP':
             ul_cost += self.net.param_size
 
         if handlers is not None:

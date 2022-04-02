@@ -119,6 +119,17 @@ class SNAP(General):
         #             except:
         #                 grad_ab = torch.zeros_like(param.data)
         #             grads_abs2[(identification, name_)] = grad_ab
+        total = 0.
+        prune_c = 0.
+        for m in neuron_masks:
+            a = m.view(-1).to(device='cpu', copy=True)
+            # zero_c +=sum(np.where(a, 0, 1))
+            a = torch.where(a>=1, 1, 0)
+            prune_c +=sum(np.where(a.numpy(), 0, 1))
+            total += m.numel()
+        print(f'global neuron masks: {prune_c}; total neuron: {total}; percentage: {prune_c / total}')
+        # for mask in neuron_masks:
+            # total += mask.ne
 
         self.handle_global_pruning(grads_abs, neuron_masks)
 
@@ -381,7 +392,7 @@ class SNAP(General):
 
     def handle_batch_norm(self, indices, n_remaining, name):
         """ shrinks a batchnorm layer """
-        return
+        # return
         # print(f'hanle_batch_norm: {name}')
         step_after = 2 if 'classifier' in name else 1
         batchnorm = [val for key, val in self.model.named_modules() if

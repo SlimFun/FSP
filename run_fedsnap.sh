@@ -1,1 +1,1 @@
-python3 -u fedsnip.py --dataset cifar10 --eta 0.01 --distribution classic_iid --total-clients 10 --clients 10 --batch-size 32 --rounds 100 --model CIFAR10Net --epochs 10  --device 2 --prune_strategy SNAP --keep_ratio 0.4 --prune_at_first_round --single_shot_pruning  --l2 0.001
+python3 -u fedsnip.py --dataset cifar10 --eta 0.01 --distribution classic_iid --total-clients 10 --clients 10 --batch-size 64 --rounds 100 --model VGG11_BN --epochs 10  --device 3 --prune_strategy SNAP --keep_ratio 0.4 --prune_at_first_round --single_shot_pruning

@@ -1,4 +1,5 @@
 import sys
+from matplotlib import container
 import numpy as np
 import torch
 import torch.cuda
@@ -9,6 +10,8 @@ import torchvision
 import prune as torch_prune
 import warnings
 
+# from models.networks.assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
+
 
 # Utility functions
 
@@ -17,6 +20,18 @@ def needs_mask(name):
 
 
 def initialize_mask(model, dtype=torch.bool):
+    # if isinstance(model, VGG):
+    #     for n, container in model.named_children():
+    #         for layer_name, layer in container.named_children():
+    #             for name, param in layer.named_parameters():
+    #                 if name.endswith('weight'):
+    #                     if hasattr(layer, name + '_mask'):
+    #                         warnings.warn(
+    #                             'Parameter has a pruning mask already. '
+    #                             'Reinitialize to an all-one mask.'
+    #                         )
+    #                     layer.register_buffer(name + '_mask', torch.ones_like(param, dtype=dtype))
+    # else:
     layers_to_prune = (layer for _, layer in model.named_children())
     for layer in layers_to_prune:
         for name, param in layer.named_parameters():
@@ -26,7 +41,6 @@ def initialize_mask(model, dtype=torch.bool):
                         'Parameter has a pruning mask already. '
                         'Reinitialize to an all-one mask.'
                     )
-                # print(name)
                 layer.register_buffer(name + '_mask', torch.ones_like(param, dtype=dtype))
                 continue
                 parent = name[:name.rfind('.')]
@@ -90,21 +104,35 @@ class PrunableNet(nn.Module):
             return 0
         return alpha/2 * (1 + np.cos(t*np.pi / t_end))
 
+    def need_masked_layer_num(self):
+        need_masked_layer = []
+        for n, layer in self.named_children():
+            if isinstance(layer, nn.modules.conv._ConvNd) or isinstance(layer, nn.Linear):
+                need_masked_layer.append(layer)
+        print(f'need masked layer num: {len(need_masked_layer)}')
+        return len(need_masked_layer)
+
 
     def _weights_by_layer(self, sparsity=0.1, sparsity_distribution='erk'):
         with torch.no_grad():
             layer_names = []
+            # prune_layer_num = self.need_masked_layer_num()
+            # sparsities = np.empty(prune_layer_num)
             sparsities = np.empty(len(list(self.named_children())))
             n_weights = np.zeros_like(sparsities, dtype=np.int)
 
+            c = 0
             for i, (name, layer) in enumerate(self.named_children()):
 
+                if (not isinstance(layer, nn.modules.conv._ConvNd)) and (not isinstance(layer, nn.Linear)):
+                    continue
                 layer_names.append(name)
                 for pname, param in layer.named_parameters():
-                    n_weights[i] += param.numel()
+                    n_weights[c] += param.numel()
 
                 if sparsity_distribution == 'uniform':
-                    sparsities[i] = sparsity
+                    sparsities[c] = sparsity
+                    c += 1
                     continue
                 
                 kernel_size = None
@@ -115,18 +143,22 @@ class PrunableNet(nn.Module):
                 elif isinstance(layer, nn.Linear):
                     neur_out = layer.out_features
                     neur_in = layer.in_features
+                elif isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.BatchNorm1d):
+                    print('skip')
                 else:
                     raise ValueError('Unsupported layer type ' + type(layer))
 
                 if sparsity_distribution == 'er':
-                    sparsities[i] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
+                    sparsities[c] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                 elif sparsity_distribution == 'erk':
                     if isinstance(layer, nn.modules.conv._ConvNd):
-                        sparsities[i] = 1 - (neur_in + neur_out + np.sum(kernel_size)) / (neur_in * neur_out * np.prod(kernel_size))
+                        sparsities[c] = 1 - (neur_in + neur_out + np.sum(kernel_size)) / (neur_in * neur_out * np.prod(kernel_size))
                     else:
-                        sparsities[i] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
+                        sparsities[c] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                 else:
                     raise ValueError('Unsupported sparsity distribution ' + sparsity_distribution)
+
+                c += 1
                 
             # Now we need to renormalize sparsities.
             # We need global sparsity S = sum(s * n) / sum(n) equal to desired
@@ -151,6 +183,8 @@ class PrunableNet(nn.Module):
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
             for name, layer in self.named_children():
 
+                if (not isinstance(layer, nn.modules.conv._ConvNd)) and (not isinstance(layer, nn.Linear)):
+                    continue
                 # We need to figure out how many to prune
                 n_total = 0
                 for bname, buf in layer.named_buffers():
@@ -191,6 +225,8 @@ class PrunableNet(nn.Module):
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
             for name, layer in self.named_children():
 
+                if (not isinstance(layer, nn.modules.conv._ConvNd)) and (not isinstance(layer, nn.Linear)):
+                    continue
                 # We need to figure out how many to grow
                 n_nonzero = 0
                 for bname, buf in layer.named_buffers():
@@ -198,7 +234,7 @@ class PrunableNet(nn.Module):
                 n_grow = int(weights_by_layer[name] - n_nonzero)
                 if n_grow < 0:
                     continue
-                #print('grow from', n_nonzero, 'to', weights_by_layer[name])
+                # print('grow from', n_nonzero, 'to', weights_by_layer[name])
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
@@ -303,6 +339,67 @@ class PrunableNet(nn.Module):
                 mask_name = keys[grow_index[0]] + "_mask"
                 state[mask_name].flatten()[grow_index[1]] = 1
             self.load_state_dict(state)
+
+    def apply_local_mask(self):
+        '''Reset weights to the given global state and apply the mask.
+        - If global_state is None, then only apply the mask in the current state.
+        - use_global_mask will reset the local mask to the global mask.
+        - keep_local_masked_weights will use the global weights where masked 1, and
+          use the local weights otherwise.
+        '''
+
+        with torch.no_grad():
+            local_state = self.state_dict()
+
+            # If no global parameters were specified, that just means we should
+            # apply the local mask, so the local state should be used as the
+            # parameter source.
+            # param_source = local_state
+
+            # We may wish to apply the global parameters but use the local mask.
+            # In these cases, we will use the local state as the mask source.
+            # apply_mask_source = local_state
+
+            # We may wish to apply the global mask to the global parameters,
+            # but not overwrite the local mask with it.
+            # copy_mask_source = apply_mask_source
+
+            self.communication_sparsity = self.sparsity(local_state.items())
+
+            # Empty new state to start with.
+
+            # Copy over the params, masking them off if needed.
+            for name, param in local_state.items():
+                if name.endswith('_mask'):
+                    # skip masks, since we will copy them with their corresponding
+                    # layers, from the mask source.
+                    continue
+
+                mask_name = name.replace('.', '_') + '_mask'
+                mask_name = mask_name.replace('_', '.', 1)
+                # if 'features' in mask_name:
+                #     mask_name[len('features')] = '.'
+                # elif 'classifier' in mask_name:
+                #     mask_name[len('classifier')] = '.'
+                # print(mask_name)
+                if needs_mask(name) and mask_name in local_state:
+
+                    mask_to_apply = local_state[mask_name]
+
+                    local_state[name][mask_to_apply] = param[mask_to_apply]
+                # else:
+                #     # biases and other unmasked things
+                #     gpu_param = param.to(self.device)
+                #     new_state[name].copy_(gpu_param)
+
+                # clean up copies made to gpu
+                # if gpu_param.data_ptr() != param.data_ptr():
+                #     del gpu_param
+
+            # print(new_state.keys())
+            # print(self.state_dict().keys())
+            # self.load_state_dict(new_state)
+        return False
 
     def reset_weights(self, global_state=None, use_global_mask=False,
                       keep_local_masked_weights=False,
@@ -587,10 +684,203 @@ class Conv2(PrunableNet):
         x = F.softmax(self.fc2(x), dim=1)
         return x
 
+        # [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
+class CNN2(PrunableNet):
+    def __init__(self, device='cpu', in_channels=3, hidden_channels=32, num_hiddens=512, num_classes=10):
+        super(CNN2, self).__init__(device=device)
+        # self.activation = nn.ReLU(True)
+
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=hidden_channels, kernel_size=(5, 5), padding=1, stride=1, bias=True)
+        self.conv2 = nn.Conv2d(in_channels=hidden_channels, out_channels=hidden_channels * 2, kernel_size=(5, 5), padding=1, stride=1, bias=True)
+        
+        # self.maxpool1 = nn.MaxPool2d(kernel_size=(2, 2), padding=1)
+        # self.maxpool2 = nn.MaxPool2d(kernel_size=(2, 2), padding=1)
+        # self.flatten = nn.Flatten()
+
+        self.fc1 = nn.Linear((hidden_channels * 2) * (8 * 8), num_hiddens, bias=True)
+        self.fc2 = nn.Linear(num_hiddens, num_classes, bias=True)
+
+        self.init_param_sizes()
+
+    def forward(self, x):
+        x = F.max_pool2d(F.relu(self.conv1(x), inplace=True), kernel_size=2, padding=1)
+
+        # x = self.activation(self.conv1(x))
+        # x = F.max_pool2d(F.relu(self.bn1(self.conv1(x)), inplace=True), kernel_size=2, stride=2)
+        # x = nn.MaxPool2d()
+        x = F.max_pool2d(F.relu(self.conv2(x), inplace=True), kernel_size=2, padding=1)
+        # x = self.activation(self.conv2(x))
+        # x = self.maxpool2(x)
+        x = x.view(x.size(0), -1)
+        # x = self.flatten(x)
+    
+        # x = self.activation(self.fc1(x))
+        x = F.relu(self.fc1(x), inplace=True)
+        x = self.fc2(x)
+        
+        return x
+
+class VGG11_BN(PrunableNet):
+    def __init__(
+        self,
+        num_classes: int = 10,
+        device='cpu',
+        init_weights: bool = True,
+    ) -> None:
+        super(VGG11_BN, self).__init__(device=device)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
+
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(128)
+
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(256)
+
+        self.conv4 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm2d(256)
+
+        self.conv5 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
+        self.bn5 = nn.BatchNorm2d(512)
+
+        self.conv6 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
+        self.bn6 = nn.BatchNorm2d(512)
+
+        self.conv7 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
+        self.bn7 = nn.BatchNorm2d(512)
+
+        self.conv8 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
+        self.bn8 = nn.BatchNorm2d(512)
+
+        self.fc1 = nn.Linear(512, 512)
+        self.bn9 = nn.BatchNorm1d(512)
+
+        self.fc2 = nn.Linear(512, 512)
+        self.bn10 = nn.BatchNorm1d(512)
+
+        self.fc3 = nn.Linear(512, num_classes)
+
+        if init_weights:
+            self._initialize_weights()
+
+        self.init_param_sizes()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.max_pool2d(F.relu(self.bn1(self.conv1(x)), inplace=True), kernel_size=2, stride=2)
+        x = F.max_pool2d(F.relu(self.bn2(self.conv2(x)), inplace=True), kernel_size=2, stride=2)
+        x = F.relu(self.bn3(self.conv3(x)), inplace=True)
+        x = F.max_pool2d(F.relu(self.bn4(self.conv4(x)), inplace=True), kernel_size=2, stride=2)
+        x = F.relu(self.bn5(self.conv5(x)), inplace=True)
+        x = F.max_pool2d(F.relu(self.bn6(self.conv6(x)), inplace=True), kernel_size=2, stride=2)
+        x = F.relu(self.bn7(self.conv7(x)), inplace=True)
+        x = F.max_pool2d(F.relu(self.bn8(self.conv8(x)), inplace=True), kernel_size=2, stride=2)
+        x = x.view(x.size(0), -1)
+
+        x = self.bn9(F.relu(self.fc1(x), inplace=True))
+        x = self.bn10(F.relu(self.fc2(x), inplace=True))
+        x = F.softmax(self.fc3(x), dim=1)
+        # x = self.fc3(x)
+        return x
+
+    def _initialize_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+class VGG(PrunableNet):
+
+    def __init__(
+        self,
+        features: nn.Module,
+        num_classes: int = 10,
+        init_weights: bool = True,
+    ) -> None:
+        super(VGG, self).__init__()
+        self.features = features
+        # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 512),  # 512 * 7 * 7 in the original VGG
+            # nn.LeakyReLU(leak, True),
+            nn.ReLU(True),
+            nn.BatchNorm1d(512),  # instead of dropout
+            nn.Linear(512, 512),
+            # nn.LeakyReLU(leak, True),
+            nn.ReLU(True),
+            nn.BatchNorm1d(512),  # instead of dropout
+            nn.Linear(512, num_classes),
+        )
+        if init_weights:
+            self._initialize_weights()
+
+        self.init_param_sizes()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+    def _initialize_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+def make_layers(cfg, batch_norm=False):
+    layers = []
+    in_channels = 3
+    for v in cfg:
+        if v == 'M':
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        else:
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [conv2d, nn.ReLU(inplace=True)]
+            in_channels = v
+    return nn.Sequential(*layers)
+
+def vgg11_bn(device='cpu'):
+    r"""VGG 11-layer model (configuration "A") with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`._
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return VGG(make_layers(cfgs['A'], batch_norm=True))
+
+cfgs ={
+    'A': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
+    'B': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
+    'D': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
+    'E': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
+}
+
+
+
+
 
 all_models = {
         'mnist': MNISTNet,
         'emnist': Conv2,
-        'cifar10': CIFAR10Net,
-        'cifar100': CIFAR100Net
+        'CIFAR10Net': CIFAR10Net,
+        'cifar100': CIFAR100Net,
+        'VGG11_BN': VGG11_BN ,
+        'CNN2': CNN2
 }

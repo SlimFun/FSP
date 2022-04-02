@@ -9,7 +9,7 @@ import SNAP
 import wandb
 
 class Server:
-    def __init__(self, model, device, train_data=None) -> None:
+    def __init__(self, model, device, train_data=None, prune_strategy='None') -> None:
         self.device = device
         self.model = model(self.device).to(self.device)
         self.masks = None
@@ -17,7 +17,8 @@ class Server:
         self.pruned = False
 
         self.transmission_cost = 0.
-
+        self.compute_time = 0.
+        self.prune_strategy = prune_strategy
         # torch.save(self.model.state_dict(), 'ori_init_model.pt')
 
     def get_global_params(self):
@@ -56,8 +57,9 @@ class Server:
         # print(f'zeros: {zero_c / total}, zero_c: {zero_c}; total: {total}')
         # 1/0
 
-        # for i in range(len(keep_masks_dict[0])):
-        #     keep_masks_dict[0][i] = torch.where(keep_masks_dict[0][i]>=6, 1, 0)
+        if self.prune_strategy == 'SNAP':
+            for i in range(len(keep_masks_dict[0])):
+                keep_masks_dict[0][i] = torch.where(keep_masks_dict[0][i]>=6, 1, 0)
 
 
         # zero_c = 0.
@@ -86,8 +88,15 @@ class Server:
             trans_cost += (download_cost[c] + upload_cost[c]) / (1024 * 1024)
         return trans_cost
 
-    def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost):
-        self.transmission_cost += int(self.round_trans_cost(download_cost, upload_cost))
+    def round_compute_time(self, compute_times):
+        comp_t = 0.
+        for c in range(len(compute_times)):
+            comp_t += compute_times[c]
+        return comp_t
+
+    def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times):
+        self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
+        self.compute_time += self.round_compute_time(compute_times)
         last_params = self.get_global_params()
 
         training_num = sum(local_train_num for (local_train_num, _) in model_list)
@@ -123,11 +132,11 @@ class Server:
             # with open(f'./applyed_masks.txt', 'a+') as f:
             #     f.write(json.dumps(applyed_masks))
             #     f.write('\n')
-            strategy = 'SNIP'
-            if strategy == 'SNIP':
+            if self.prune_strategy == 'SNIP':
                 self._prune_global_model(self.masks)
-            else:
+            elif self.prune_strategy == 'SNAP':
                 if not self.pruned:
+                    print('global model prune')
                     # self.model = self.model.to(self.device)
                     SNAP.SNAP(model=self.model, device=self.device).prune_global_model(self.masks, self.train_data)
                     self.pruned = True
@@ -145,23 +154,23 @@ class Server:
 
         train_accuracies, train_losses, test_accuracies, test_losses = utils.evaluate_local(clients, self.model, progress=True,
                                                     n_batches=0)
-        # wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=round)
-        # wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=round)
-        # print(f'round: {round}')
-        # print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
-
-        # wandb.log({"Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=round)
-        # wandb.log({"Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=round)
-        # print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
-
-        wandb.log({"Trans_Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=int(self.transmission_cost))
-        wandb.log({"Trans_Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=int(self.transmission_cost))
+        wandb.log({"Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values()), 'round': round, 'comm_cost': int(self.transmission_cost), 'training_time': self.compute_time})
+        wandb.log({"Train/Loss": sum(train_losses.values())/len(train_losses.values()), 'round': round, 'comm_cost': int(self.transmission_cost), 'training_time': self.compute_time})
         print(f'round: {round}')
         print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
 
-        wandb.log({"Trans_Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=int(self.transmission_cost))
-        wandb.log({"Trans_Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=int(self.transmission_cost))
+        wandb.log({"Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values()), 'round': round, 'comm_cost': int(self.transmission_cost), 'training_time': self.compute_time})
+        wandb.log({"Test/Loss": sum(test_losses.values())/len(test_losses.values()), 'round': round, 'comm_cost': int(self.transmission_cost), 'training_time': self.compute_time})
         print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
+
+        # wandb.log({"Trans_Train/Acc": sum(train_accuracies.values())/len(train_accuracies.values())}, step=int(self.transmission_cost))
+        # wandb.log({"Trans_Train/Loss": sum(train_losses.values())/len(train_losses.values())}, step=int(self.transmission_cost))
+        # print(f'round: {round}')
+        # print(f'Train/Acc : {sum(train_accuracies.values())/len(train_accuracies.values())}; Train/Loss: {sum(train_losses.values())/len(train_losses.values())};')
+
+        # wandb.log({"Trans_Test/Acc": sum(test_accuracies.values())/len(test_accuracies.values())}, step=int(self.transmission_cost))
+        # wandb.log({"Trans_Test/Loss": sum(test_losses.values())/len(test_losses.values())}, step=int(self.transmission_cost))
+        # print(f'Test/Acc : {sum(test_accuracies.values())/len(test_accuracies.values())}; Test/Loss: {sum(test_losses.values())/len(test_losses.values())};')
 
         return train_accuracies, test_accuracies
 

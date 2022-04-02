@@ -86,6 +86,11 @@ parser.add_argument('--prune_vote', type=int, default=1,
 
 parser.add_argument('--single_shot_pruning', default=False, action='store_true', dest='single_shot_pruning')
 
+parser.add_argument('--partition_method', type=str, default='homo', metavar='N',
+                        help='how to partition the dataset on local workers')
+
+parser.add_argument('--partition_alpha', type=float, default=0.5, metavar='PA',
+                    help='partition alpha (default: 0.5)')
 
 random.seed(0)
 np.random.seed(0)
@@ -114,7 +119,7 @@ def main(args):
     path = os.path.join('..', 'data', args.dataset)
     train_data_num, test_data_num, train_data_global, test_data_global, \
         train_data_local_num_dict, train_data_local_dict, test_data_local_dict, \
-        class_num = load_partition_data_cifar10(args.dataset, path, 'homo', None, args.total_clients, args.batch_size)
+        class_num = load_partition_data_cifar10(args.dataset, path, args.partition_method, args.partition_alpha, args.total_clients, args.batch_size)
 
     # t0 = time.time()
 
@@ -138,7 +143,7 @@ def main(args):
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    server = Server(all_models[args.model], devices[0], train_data_local_dict[0])
+    server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy)
     # server = Server(vgg11_bn, devices[0])
     print(f'server model param size: {server.model.param_size}')
     compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
@@ -155,11 +160,11 @@ def main(args):
         for client_id in client_indices:
             client = clients[client_id]
 
-            t0 = time.time()
             if (round == 1) and (args.prune_strategy == 'SNAP'):
                 del client.net
                 torch.cuda.empty_cache()
                 client.net = copy.deepcopy(server.model)
+            t0 = time.time()
             train_result = client.train(global_params=global_params,
                                         sparsity=1-args.keep_ratio,
                                         single_shot_pruning=args.single_shot_pruning,
@@ -177,7 +182,7 @@ def main(args):
             model_list.append((client.train_size, cl_params))
 
 
-        server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost)
+        server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times)
 
         # yield DebugInfo('', (model_list, server))
 

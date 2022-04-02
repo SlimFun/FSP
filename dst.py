@@ -1,3 +1,4 @@
+
 import torch
 import torch.cuda
 from torch import nn
@@ -75,8 +76,8 @@ parser.add_argument('--grasp', default=False, action='store_true')
 parser.add_argument('--fp16', default=False, action='store_true', help='upload as fp16')
 parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileType('a', encoding='ascii'))
 
-parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'cifar10'),
-                    default='VGG11_BN', help='Dataset to use')
+parser.add_argument('--model', type=str, choices=('CIFAR10Net', 'VGG11_BN', 'CNN2'),
+                    default='CIFAR10Net', help='Dataset to use')
 
 args = parser.parse_args()
 devices = [torch.device(x) for x in args.device]
@@ -201,7 +202,7 @@ class Client:
         self.device = device
         self.net = net(device=self.device).to(self.device)
         initialize_mask(self.net)
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss().to(self.device)
 
         self.learning_rate = learning_rate
         self.reset_optimizer()
@@ -258,7 +259,7 @@ class Client:
 
         #pre_training_state = {k: v.clone() for k, v in self.net.state_dict().items()}
         for epoch in range(self.local_epochs):
-
+            # print(epoch)
             self.net.train()
 
             running_loss = 0.
@@ -269,14 +270,21 @@ class Client:
                 labels = labels.to(self.device)
                 self.optimizer.zero_grad()
 
+                # t0 = time.time()
                 outputs = self.net(inputs)
+                # t1 = time.time()
+                # print(f'forward time: {t1 - t0}')
                 loss = self.criterion(outputs, labels)
                 if args.prox > 0:
                     loss += args.prox / 2. * self.net.proximal_loss(global_params)
                 loss.backward()
+                # t2 = time.time()
+                # print(f'backward time: {t2 - t1}')
                 self.optimizer.step()
 
                 self.reset_weights() # applies the mask
+                # self.net.apply_local_mask()
+                # print(f'reset time: {time.time() - t2}')
 
                 running_loss += loss.item()
 
@@ -351,7 +359,7 @@ wandb.init(
         )
 
 for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
-    cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
+    cl = Client(client_id, *client_loaders, net=all_models[args.model],
                 learning_rate=args.eta, local_epochs=args.epochs,
                 target_sparsity=args.sparsity)
     clients[client_id] = cl
@@ -359,7 +367,7 @@ for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[args.dataset](device='cpu')
+global_model = all_models[args.model](device=devices[0])
 initialize_mask(global_model)
 
 # execute grasp on one client if needed
@@ -372,9 +380,9 @@ if args.grasp:
     for cname, ch in pruned_net.named_children():
         for bname, buf in ch.named_buffers():
             if bname == 'weight_mask':
-                pruned_masks[cname] = buf.to(device=torch.device('cpu'), dtype=torch.bool)
+                pruned_masks[cname] = buf.to(device=torch.device(devices[0]), dtype=torch.bool)
         for pname, param in ch.named_parameters():
-            pruned_params[(cname, pname)] = param.to(device=torch.device('cpu'))
+            pruned_params[(cname, pname)] = param.to(device=torch.device(devices[0]))
     for cname, ch in global_model.named_children():
         for bname, buf in ch.named_buffers():
             if bname == 'weight_mask':
@@ -393,7 +401,8 @@ initial_global_params = deepcopy(global_model.state_dict())
 compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
 download_cost = np.zeros(len(clients))
 upload_cost = np.zeros(len(clients))
-trans_cost = 0
+trans_cost = 0.
+compt_time = 0.
 
 # for each round t = 1, 2, ... do
 for server_round in tqdm(range(args.rounds)):
@@ -401,6 +410,7 @@ for server_round in tqdm(range(args.rounds)):
 
     # sample clients
     client_indices = rng.choice(list(clients.keys()), size=args.clients)
+    # client_indices = [i for i in range(len(clients))]
 
     global_params = global_model.state_dict()
     aggregated_params = {}
@@ -410,10 +420,10 @@ for server_round in tqdm(range(args.rounds)):
     for name, param in global_params.items():
         if name.endswith('_mask'):
             continue
-        aggregated_params[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
-        aggregated_params_for_mask[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
+        aggregated_params[name] = torch.zeros_like(param, dtype=torch.float, device=devices[0])
+        aggregated_params_for_mask[name] = torch.zeros_like(param, dtype=torch.float, device=devices[0])
         if needs_mask(name):
-            aggregated_masks[name] = torch.zeros_like(param, device='cpu')
+            aggregated_masks[name] = torch.zeros_like(param, device=devices[0])
 
     # for each client k \in S_t in parallel do
     total_sampled = 0
@@ -450,12 +460,14 @@ for server_round in tqdm(range(args.rounds)):
         download_cost[i] = train_result['dl_cost']
         upload_cost[i] = train_result['ul_cost']
         print(f"client :{client.id}; dl_cost: {train_result['dl_cost']}; ul_cost: {train_result['ul_cost']}")
-        trans_cost += int((train_result['dl_cost'] + train_result['ul_cost']) / (1024 * 1024))
+        trans_cost += (train_result['dl_cost'] + train_result['ul_cost']) / (1024. * 1024.)
+
             
         t1 = time.process_time()
         compute_times[i] = t1 - t0
         print(f'training time: {t1 - t0}')
         client.net.clear_gradients() # to save memory
+        compt_time += compute_times[i]
 
         # add this client's params to the aggregate
 
@@ -468,48 +480,45 @@ for server_round in tqdm(range(args.rounds)):
                 name = name[:-5]
             elif name.endswith('_mask'):
                 name = name[:-5]
-                cl_mask_params[name] = cl_param.to(device='cpu', copy=True)
+                cl_mask_params[name] = cl_param.to(device=devices[0], copy=True)
                 continue
 
-            cl_weight_params[name] = cl_param.to(device='cpu', copy=True)
+            cl_weight_params[name] = cl_param.to(device=devices[0], copy=True)
             if args.fp16:
                 cl_weight_params[name] = cl_weight_params[name].to(torch.bfloat16).to(torch.float)
 
-        t2 = time.process_time()
+        t2 = time.time()
         print(f'training time: {t2 - t1}')
         # at this point, we have weights and masks (possibly all-ones)
         # for this client. we will proceed by applying the mask and adding
         # the masked received weights to the aggregate, and adding the mask
         # to the aggregate as well.
-        total_training_size = client.train_size()
+        total_training_size = 5000.
+        # print(cl_mask_params.keys())
         for name, cl_param in cl_weight_params.items():
             if name in cl_mask_params:
                 # things like weights have masks
                 cl_mask = cl_mask_params[name]
-                sv_mask = global_params[name + '_mask'].to('cpu', copy=True)
+                sv_mask = global_params[name + '_mask'].to(devices[0], copy=True)
 
                 # calculate Hamming distance of masks for debugging
                 if readjust:
                     dprint(f'{client.id} {name} d_h=', torch.sum(cl_mask ^ sv_mask).item())
 
-                # agg_params = total_training_size * cl_param * cl_mask
-                # aggregated_params[name].add_(agg_params)
-                # aggregated_params_for_mask[name].add_(agg_params)
-                # aggregated_masks[name].add_(total_training_size * cl_mask)
                 aggregated_params[name].add_(total_training_size * cl_param * cl_mask)
                 aggregated_params_for_mask[name].add_(total_training_size * cl_param * cl_mask)
                 aggregated_masks[name].add_(total_training_size * cl_mask)
                 if args.remember_old:
                     sv_mask[cl_mask] = 0
-                    sv_param = global_params[name].to('cpu', copy=True)
+                    sv_param = global_params[name].to(devices[0], copy=True)
 
-                    aggregated_params_for_mask[name].add_(client.train_size() * sv_param * sv_mask)
-                    aggregated_masks[name].add_(client.train_size() * sv_mask)
+                    aggregated_params_for_mask[name].add_(total_training_size * sv_param * sv_mask)
+                    aggregated_masks[name].add_(total_training_size * sv_mask)
             else:
                 # things like biases don't have masks
-                aggregated_params[name].add_(client.train_size() * cl_param)
+                aggregated_params[name].add_(total_training_size * cl_param)
         
-        t3 = time.process_time()
+        t3 = time.time()
         print(f'aggregate time: {t3 - t2}')
     
     # at this point, we have the sum of client parameters
@@ -519,7 +528,8 @@ for server_round in tqdm(range(args.rounds)):
 
         # if this parameter has no associated mask, simply take the average.
         if name not in aggregated_masks:
-            aggregated_params[name] /= sum(clients[i].train_size() for i in client_indices)
+            # aggregated_params[name] /= sum(clients[i].train_size() for i in client_indices)
+            aggregated_params[name] /= 50000.
             continue
 
         # drop parameters with not enough votes
@@ -608,8 +618,8 @@ for server_round in tqdm(range(args.rounds)):
 
     # wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=server_round)
     # wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
-
-    wandb.log({"Trans_Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=trans_cost)
+    wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values()), 'round': server_round, 'comm_cost': trans_cost, 'training_time': compt_time})
+    # wandb.log({"Trans_Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=int(trans_cost))
 
     if server_round % args.eval_every == 0 and args.eval:
         # clear compute, UL, DL costs
