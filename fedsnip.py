@@ -76,11 +76,11 @@ parser.add_argument('--clip_grad', default=False, action='store_true', dest='cli
 parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net'),
                     default='VGG11_BN', help='Dataset to use')
 
-parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP'),
+parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP'),
                     default='None', help='Dataset to use')
 parser.add_argument('--prune_at_first_round', default=False, action='store_true', dest='prune_at_first_round')
 parser.add_argument('--keep_ratio', type=float, default=0.0,
-                    help='local client batch size')         
+                    help='local client keep ratio')         
 parser.add_argument('--prune_vote', type=int, default=1,
                     help='local client batch size')
 
@@ -91,6 +91,8 @@ parser.add_argument('--partition_method', type=str, default='homo', metavar='N',
 
 parser.add_argument('--partition_alpha', type=float, default=0.5, metavar='PA',
                     help='partition alpha (default: 0.5)')
+
+parser.add_argument('--target_keep_ratio', default=0.1, type=float, help='server target keep ratio')
 
 random.seed(0)
 np.random.seed(0)
@@ -130,7 +132,7 @@ def main(args):
 
     wandb.init(
                 project="fedsnip",
-                name="FedAVG(d)"+ str(args.prune_strategy) + str(args.keep_ratio) + '-' + str(args.distribution) + "-prune_at_1r" + str(args.prune_at_first_round) + "-single_shot_pruning" + str(args.single_shot_pruning) + "-lr" + str(
+                name="FedAVG(d)"+ str(args.prune_strategy) + '-target_kr' + str(args.target_keep_ratio) + '-' + str(args.keep_ratio) + '-' + str(args.distribution) + "-prune_at_1r" + str(args.prune_at_first_round) + "-single_shot_pruning" + str(args.single_shot_pruning) + "-lr" + str(
                     args.eta) + '-clip_grad' + str(args.clip_grad),
                 config=args
             )
@@ -143,13 +145,20 @@ def main(args):
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy)
+
+    server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy, target_keep_ratio=args.target_keep_ratio)
     # server = Server(vgg11_bn, devices[0])
     print(f'server model param size: {server.model.param_size}')
     compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
     download_cost = np.zeros(len(clients))
     upload_cost = np.zeros(len(clients))
 
+    global_masks = None
+    if args.prune_strategy == 'random_masks':
+        global_masks = server.generate_random_masks(sparsity=1-args.target_keep_ratio)
+        # server.masks is not None, will not merge and change server masks
+        server.masks = global_masks
+        server._prune_global_model(global_masks)
     # server.init_global_model()
     for round in range(args.rounds):
         keep_masks_dict = {}
@@ -170,7 +179,8 @@ def main(args):
                                         single_shot_pruning=args.single_shot_pruning,
                                         test_on_each_round=True,
                                         clip_grad=args.clip_grad,
-                                        global_sparsity=server.model.sparsity_percentage())
+                                        global_sparsity=server.model.sparsity_percentage(),
+                                        global_masks=global_masks)
             cl_params = train_result['state']
             cl_mask_prarms = train_result['mask']
             download_cost[client_id] = train_result['dl_cost']
@@ -184,7 +194,10 @@ def main(args):
 
         server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times)
 
-        # yield DebugInfo('', (model_list, server))
+        global_masks = server.masks
+
+        print('server masked {}% params'.format(server.masked_percent() * 100))
+        # yield DebugInfo('', (server))
 
         if round % args.eval_every == 0:
             train_accuracies, test_accuracies = server.test_global_model_on_all_client(clients, round)

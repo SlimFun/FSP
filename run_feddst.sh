@@ -1,1 +1,1 @@
-python3 dst.py --dataset cifar10 --sparsity 0.8 --readjustment-ratio 0.01 --rounds-between-readjustments 15 --total-clients 10 --clients 10 --model CNN2 --rounds 100 --device 3 --sparsity-distribution uniform --batch-size 64 --l2 1e-5
+python3 dst.py --dataset cifar10 --sparsity 0.995 --readjustment-ratio 0.01 --rounds-between-readjustments 5 --total-clients 10 --clients 10 --model CNN2 --rounds 100 --device 0 --sparsity-distribution erk --batch-size 64 --l2 1e-5 --partition_method hetero --partition_alpha 0.5

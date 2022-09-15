@@ -363,9 +363,14 @@ def apply_grad_mask(net, keep_masks):
         lambda layer: isinstance(layer, nn.Conv2d) or isinstance(
             layer, nn.Linear), net.modules())
 
+
+    for mask in keep_masks:
+        print(mask.shape)
+
     handles = []
 
     for layer, keep_mask in zip(prunable_layers, keep_masks):
+        print('layer.shape: {}; mask.shape: {}'.format(layer.weight.shape, keep_mask.shape))
         assert (layer.weight.shape == keep_mask.shape)
         # print(layer.weight.shape)
 
@@ -387,5 +392,36 @@ def apply_grad_mask(net, keep_masks):
         # layer.weight.data[keep_mask == 0.] = 0.
         # layer.weight.register_hook(hook_factory(keep_mask))
         handles.append(layer.weight.register_hook(hook_factory(keep_mask)))
+
+    # for mask in keep_masks:
+    #     print(mask.shape)
+
+    # handles = []
+    # for (name, layer), keep_mask in zip(net.named_modules(), keep_masks):
+    #     if isinstance(layer, nn.Conv2d) or isinstance(
+    #         layer, nn.Linear):
+    #         print(name)
+    #         print('layer.shape: {}; mask.shape: {}'.format(layer.weight.shape, keep_mask.shape))
+    #         assert (layer.weight.shape == keep_mask.shape)
+    #         # print(layer.weight.shape)
+
+    #         def hook_factory(keep_mask):
+    #             """
+    #             The hook function can't be defined directly here because of Python's
+    #             late binding which would result in all hooks getting the very last
+    #             mask! Getting it through another function forces early binding.
+    #             """
+
+    #             def hook(grads):
+    #                 return grads * keep_mask
+
+    #             return hook
+
+    #         # mask[i] == 0 --> Prune parameter
+    #         # mask[i] == 1 --> Keep parameter
+
+    #         # layer.weight.data[keep_mask == 0.] = 0.
+    #         # layer.weight.register_hook(hook_factory(keep_mask))
+    #         handles.append(layer.weight.register_hook(hook_factory(keep_mask)))
 
     return handles

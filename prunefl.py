@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.cuda
 from torch import nn
@@ -10,13 +11,19 @@ import os
 import sys
 import time
 from copy import deepcopy
+import random
+import wandb
 
 from tqdm import tqdm
 import warnings
 
+from data_loader import load_partition_data_cifar10
+
 from datasets import get_dataset
-import cv_models.models as models
-from cv_models.models import all_models, needs_mask, initialize_mask
+# import cv_models.models as models
+# from cv_models.models import all_models, needs_mask, initialize_mask
+import models_bak as models
+from models_bak import all_models, needs_mask, initialize_mask
 
 import pickle
 
@@ -57,8 +64,25 @@ parser.add_argument('--initial-rounds', default=5, type=int, help='number of "in
 parser.add_argument('--rounds-between-readjustments', default=50, type=int, help='rounds between readj')
 layer_times = [4.78686788e-05, 2.29976004e-05, 1.35797902e-06, 1.13535336e-06,
         1.06144932e-06]
+vgg11_layer_time = [0., 0., 8.95507e-6, 0., 2.495288e-6, 0., 2.780686e-6, 0., 1.024265e-6, 0., 1.277773e-6, 0., 1.843831e-6, 0.,
+                       8.066104e-7, 0., 5.145334e-7, 0., 2.430023e-7, 0., 0.]
+
+parser.add_argument('--model', type=str, choices=('CIFAR10Net', 'VGG11_BN', 'CNN2'),
+                    default='CIFAR10Net', help='Dataset to use')
+
+parser.add_argument('--partition_method', type=str, default='homo', metavar='N',
+                        help='how to partition the dataset on local workers')
+
+parser.add_argument('--partition_alpha', type=float, default=0.5, metavar='PA',
+                    help='partition alpha (default: 0.5)')
 
 args = parser.parse_args()
+
+random.seed(0)
+np.random.seed(0)
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
+
 devices = [torch.device(x) for x in args.device]
 args.pid = os.getpid()
 
@@ -122,16 +146,24 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 dprint('Fetching dataset...')
 cache_devices = devices
 
-if os.path.isfile(args.dataset + '.pickle'):
-    with open(args.dataset + '.pickle', 'rb') as f:
-        loaders = pickle.load(f)
-else:
-    loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution,
-                          beta=args.beta,
-                          batch_size=args.batch_size, devices=cache_devices,
-                          min_samples=args.min_samples)
-    with open(args.dataset + '.pickle', 'wb') as f:
-        pickle.dump(loaders, f)
+# if os.path.isfile(args.dataset + '.pickle'):
+#     with open(args.dataset + '.pickle', 'rb') as f:
+#         loaders = pickle.load(f)
+# else:
+#     loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution,
+#                           beta=args.beta,
+#                           batch_size=args.batch_size, devices=cache_devices,
+#                           min_samples=args.min_samples)
+#     with open(args.dataset + '.pickle', 'wb') as f:
+#         pickle.dump(loaders, f)
+path = os.path.join('..', 'data', args.dataset)
+train_data_num, test_data_num, train_data_global, test_data_global, \
+        train_data_local_num_dict, train_data_local_dict, test_data_local_dict, \
+        class_num = load_partition_data_cifar10(args.dataset, path, args.partition_method, args.partition_alpha, args.total_clients, args.batch_size)
+
+loaders = {}
+for client_id in train_data_local_dict.keys():
+    loaders[client_id] = (devices[0], train_data_local_dict[client_id], test_data_local_dict[client_id])
 
 class Client:
 
@@ -189,8 +221,28 @@ class Client:
     def train_size(self):
         return sum(len(x) for x in self.train_data)
 
+    # def initial_prune(self, global_params=None):
+    #     ul_cost = 0
+    #     dl_cost = 0
 
-    def train(self, global_params=None, readjust=False):
+    #     mask_changed = self.reset_weights(global_state=global_params, use_global_mask=True)
+    #     self.reset_optimizer()
+    #     if mask_changed:
+    #         dl_cost += self.net.mask_size # need to receive mask
+
+    #     if not self.initial_global_params:
+    #         self.initial_global_params = initial_global_params
+    #         # no DL cost here: we assume that these are transmitted as a random seed
+    #     else:
+    #         # otherwise, there is a DL cost: we need to receive all parameters masked '1' and
+    #         # all parameters that don't have a mask (e.g. biases in this case)
+    #         dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
+
+    #     for epoch in range(10):
+            
+            
+
+    def train(self, global_params=None, readjust=False, initial_prune=False):
         '''Train the client network for a single round.'''
 
         ul_cost = 0
@@ -239,6 +291,9 @@ class Client:
 
             self.curr_epoch += 1
 
+            # if initial_prune and epoch >= 1:
+            #     break
+
         if readjust:
             # we will upload stochastic gradients for prunable weights
             ul_cost += self.net.mask_size * 32
@@ -286,20 +341,36 @@ class Client:
         return correct / total
 
 
+# def init_layer_times(net):
+#     layer_times = []
+#     for name, param in net.named_parameters():
+#         # logging.info(name)
+#         if not needs_mask(name):
+#             continue
+#         layer_times.append(1.)
+#     return layer_times
+
 # initialize clients
 dprint('Initializing clients...')
 clients = {}
 client_ids = []
 
+wandb.init(
+            # project="federated_nas",
+            project="fedsnip",
+            name="PruneFL(d)" + '-' + str(args.model) + '-' + str(args.partition_method) + str(args.partition_alpha) + "-lr" + str(args.eta),
+            config=args
+        )
+
 for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
-    cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
+    cl = Client(client_id, *client_loaders, net=all_models[args.model],
                 learning_rate=args.eta, local_epochs=args.epochs)
     clients[client_id] = cl
     client_ids.append(client_id)
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[args.dataset](device='cpu')
+global_model = all_models[args.model](device=devices[0])
 initialize_mask(global_model)
 initial_global_params = deepcopy(global_model.state_dict())
 
@@ -308,6 +379,12 @@ initial_global_params = deepcopy(global_model.state_dict())
 compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
 download_cost = np.zeros(len(clients))
 upload_cost = np.zeros(len(clients))
+trans_cost = 0.
+compt_time = 0.
+
+# layer_times = init_layer_times(global_model)
+logging.info('layer_times len: {}'.format(len(layer_times)))
+# layer_times = vgg11_layer_time
 
 # pick a client randomly and perform some local readjustment there only.
 # all clients are equally bad in this setting
@@ -316,7 +393,7 @@ last_differences = []
 for r in tqdm(range(args.initial_rounds)):
     global_params = global_model.state_dict()
     readjust = (r - 1) % args.rounds_between_readjustments == 0
-    train_result = initial_client.train(global_params=global_params, readjust=readjust)
+    train_result = initial_client.train(global_params=global_params, readjust=readjust, initial_prune=True)
 
     gradients = []
     for name, param in initial_client.net.named_parameters():
@@ -369,9 +446,11 @@ for server_round in tqdm(range(args.rounds)):
         cl_params = train_result['state']
         download_cost[i] = train_result['dl_cost']
         upload_cost[i] = train_result['ul_cost']
+        trans_cost += (train_result['dl_cost'] + train_result['ul_cost']) / (1024. * 1024.)
             
         t1 = time.process_time()
         compute_times[i] = t1 - t0
+        compt_time += compute_times[i]
 
         # add this client's params to the aggregate
 
@@ -495,6 +574,9 @@ for server_round in tqdm(range(args.rounds)):
         # a random seed, so the time and place for this is not a concern to us)
         if server_round == 0:
             clients[client_id].initial_global_params = initial_global_params
+
+    wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
+    wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values()), 'round': server_round, 'comm_cost': trans_cost, 'training_time': compt_time})
 
     if server_round % args.eval_every == 0 and args.eval:
         # clear compute, UL, DL costs

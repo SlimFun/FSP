@@ -23,6 +23,10 @@ import wandb
 import random
 import numpy as np
 
+def check_random_masks(random_masks):
+    for mask in random_masks:
+        print('total {}'.format(mask.numel()))
+
 class Client:
 
     def __init__(self, id, device, train_data, test_data, prune_strategy=None, net=models.CNN2,
@@ -103,7 +107,7 @@ class Client:
     def get_net_params(self):
         return self.net.cpu().state_dict()
 
-    def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False, test_on_each_round=False, clip_grad=False, global_sparsity=None):
+    def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False, test_on_each_round=False, clip_grad=False, global_sparsity=None, global_masks=None):
         '''Train the client network for a single round.'''
 
         ul_cost = 0
@@ -134,6 +138,7 @@ class Client:
             # downloads partial global model(do we need masks now ???)
             # print(global_sparsity)
             dl_cost += (1-global_sparsity) * self.net.param_size
+            self.net.mask = global_masks
                 
             handlers = apply_grad_mask(self.net, self.net.mask)
         elif self.prune_strategy == 'SNAP':
@@ -151,6 +156,13 @@ class Client:
             dl_cost += self.net.param_size
         elif self.prune_strategy == 'None':
             dl_cost += self.net.param_size
+        elif self.prune_strategy == 'random_masks':
+            # print('==========random_masks===============')
+            # print(random_masks)
+            # check_random_masks(random_masks)
+            dl_cost += (1-global_sparsity) * self.net.param_size
+            handlers = apply_grad_mask(self.net, global_masks)
+
 
         
         if global_params:
@@ -234,6 +246,8 @@ class Client:
             ul_cost += self.net.param_size
         elif self.prune_strategy == 'SNAP':
             ul_cost += self.net.param_size
+        elif self.prune_strategy == 'random_masks':
+            ul_cost += (1-global_sparsity) * self.net.param_size
 
         if handlers is not None:
             for h in handlers:

@@ -1,0 +1,1 @@
+dst.py --dataset cifar10 --sparsity 0.8 --readjustment-ratio 0.0 --total-clients 10 --clients 10 --model CNN2 --rounds 100 --device 3 --sparsity-distribution uniform --batch-size 64 --l2 1e-5

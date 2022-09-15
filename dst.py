@@ -1,4 +1,6 @@
 
+import logging
+from cv2 import log
 import torch
 import torch.cuda
 from torch import nn
@@ -25,6 +27,7 @@ from models_bak import all_models, needs_mask, initialize_mask
 # from models.models import all_models, needs_mask, initialize_mask
 
 from data_loader import load_partition_data_cifar10
+import random
 
 rng = np.random.default_rng()
 
@@ -78,6 +81,17 @@ parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileT
 
 parser.add_argument('--model', type=str, choices=('CIFAR10Net', 'VGG11_BN', 'CNN2'),
                     default='CIFAR10Net', help='Dataset to use')
+
+parser.add_argument('--partition_method', type=str, default='homo', metavar='N',
+                        help='how to partition the dataset on local workers')
+
+parser.add_argument('--partition_alpha', type=float, default=0.5, metavar='PA',
+                    help='partition alpha (default: 0.5)')
+
+random.seed(0)
+np.random.seed(0)
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
 
 args = parser.parse_args()
 devices = [torch.device(x) for x in args.device]
@@ -168,7 +182,7 @@ else:
 path = os.path.join('..', 'data', args.dataset)
 train_data_num, test_data_num, train_data_global, test_data_global, \
         train_data_local_num_dict, train_data_local_dict, test_data_local_dict, \
-        class_num = load_partition_data_cifar10(args.dataset, path, 'homo', None, args.total_clients, args.batch_size)
+        class_num = load_partition_data_cifar10(args.dataset, path, args.partition_method, args.partition_alpha, args.total_clients, args.batch_size)
 
 loaders = {}
 for client_id in train_data_local_dict.keys():
@@ -176,8 +190,8 @@ for client_id in train_data_local_dict.keys():
 
 class Client:
 
-    def __init__(self, id, device, train_data, test_data, net=models.Conv2,
-                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1):
+    def __init__(self, id, device, train_data, test_data, net=models.CNN2,
+                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1, momentum=0.9, weight_decay=1e-5):
         '''Construct a new client.
 
         Parameters:
@@ -205,6 +219,8 @@ class Client:
         self.criterion = nn.CrossEntropyLoss().to(self.device)
 
         self.learning_rate = learning_rate
+        self.momentum = momentum
+        self.weight_decay = weight_decay
         self.reset_optimizer()
 
         self.local_epochs = local_epochs
@@ -216,7 +232,8 @@ class Client:
 
 
     def reset_optimizer(self):
-        self.optimizer = torch.optim.SGD(self.net.parameters(), lr=self.learning_rate, momentum=args.momentum, weight_decay=args.l2)
+        self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.net.parameters()), lr=self.learning_rate, momentum=self.momentum, weight_decay=self.weight_decay)
+        # self.optimizer = torch.optim.SGD(self.net.parameters(), lr=self.learning_rate, momentum=args.momentum, weight_decay=args.l2)
 
 
     def reset_weights(self, *args, **kwargs):
@@ -289,6 +306,7 @@ class Client:
                 running_loss += loss.item()
 
             if (self.curr_epoch - args.pruning_begin) % args.pruning_interval == 0 and readjust:
+                print('prune readjust !!!!!!!!!!!!!!!!!!!!!!!!')
                 prune_sparsity = sparsity + (1 - sparsity) * args.readjustment_ratio
                 # recompute gradient if we used FedProx penalty
                 self.optimizer.zero_grad()
@@ -354,14 +372,14 @@ client_ids = []
 wandb.init(
             # project="federated_nas",
             project="fedsnip",
-            name="FedDST(d)",
+            name="FedDST(d)" + '-' + str(args.model) + '-' + str(args.partition_method) + str(args.partition_alpha) + "-lr" + str(args.eta),
             config=args
         )
 
 for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
     cl = Client(client_id, *client_loaders, net=all_models[args.model],
                 learning_rate=args.eta, local_epochs=args.epochs,
-                target_sparsity=args.sparsity)
+                target_sparsity=args.sparsity, momentum=args.momentum, weight_decay=args.l2)
     clients[client_id] = cl
     client_ids.append(client_id)
     torch.cuda.empty_cache()
@@ -427,6 +445,7 @@ for server_round in tqdm(range(args.rounds)):
 
     # for each client k \in S_t in parallel do
     total_sampled = 0
+    total_training_size = 0.
     for client_id in client_indices:
         client = clients[client_id]
         i = client_ids.index(client_id)
@@ -493,7 +512,8 @@ for server_round in tqdm(range(args.rounds)):
         # for this client. we will proceed by applying the mask and adding
         # the masked received weights to the aggregate, and adding the mask
         # to the aggregate as well.
-        total_training_size = 5000.
+        lotal_training_size = client.train_size()
+        total_training_size += lotal_training_size
         # print(cl_mask_params.keys())
         for name, cl_param in cl_weight_params.items():
             if name in cl_mask_params:
@@ -505,18 +525,18 @@ for server_round in tqdm(range(args.rounds)):
                 if readjust:
                     dprint(f'{client.id} {name} d_h=', torch.sum(cl_mask ^ sv_mask).item())
 
-                aggregated_params[name].add_(total_training_size * cl_param * cl_mask)
-                aggregated_params_for_mask[name].add_(total_training_size * cl_param * cl_mask)
-                aggregated_masks[name].add_(total_training_size * cl_mask)
+                aggregated_params[name].add_(lotal_training_size * cl_param * cl_mask)
+                aggregated_params_for_mask[name].add_(lotal_training_size * cl_param * cl_mask)
+                aggregated_masks[name].add_(lotal_training_size * cl_mask)
                 if args.remember_old:
                     sv_mask[cl_mask] = 0
                     sv_param = global_params[name].to(devices[0], copy=True)
 
-                    aggregated_params_for_mask[name].add_(total_training_size * sv_param * sv_mask)
-                    aggregated_masks[name].add_(total_training_size * sv_mask)
+                    aggregated_params_for_mask[name].add_(lotal_training_size * sv_param * sv_mask)
+                    aggregated_masks[name].add_(lotal_training_size * sv_mask)
             else:
                 # things like biases don't have masks
-                aggregated_params[name].add_(total_training_size * cl_param)
+                aggregated_params[name].add_(lotal_training_size * cl_param)
         
         t3 = time.time()
         print(f'aggregate time: {t3 - t2}')
@@ -529,7 +549,7 @@ for server_round in tqdm(range(args.rounds)):
         # if this parameter has no associated mask, simply take the average.
         if name not in aggregated_masks:
             # aggregated_params[name] /= sum(clients[i].train_size() for i in client_indices)
-            aggregated_params[name] /= 50000.
+            aggregated_params[name] /= total_training_size
             continue
 
         # drop parameters with not enough votes
@@ -617,7 +637,7 @@ for server_round in tqdm(range(args.rounds)):
             clients[client_id].initial_global_params = initial_global_params
 
     # wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=server_round)
-    # wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
+    wandb.log({"Test/Sparsity": sum(sparsities.values())/len(sparsities.values())}, step=server_round)
     wandb.log({"Test/Acc": sum(accuracies.values())/len(accuracies.values()), 'round': server_round, 'comm_cost': trans_cost, 'training_time': compt_time})
     # wandb.log({"Trans_Test/Acc": sum(accuracies.values())/len(accuracies.values())}, step=int(trans_cost))
 

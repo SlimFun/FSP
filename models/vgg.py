@@ -1,5 +1,6 @@
 "Modified from https://github.com/pytorch/vision/blob/master/torchvision/models/vgg.py"
 
+from typing import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +26,7 @@ class VGG(Pruneable):
         super(VGG, self).__init__(device=device)
         self.features = features
         # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-        self.classifier = nn.Sequential(
+        self.classifier = nn.Sequential(OrderedDict([
             # nn.Linear(512 * 7 * 7, 4096),
             # nn.ReLU(True),
             # nn.Dropout(),
@@ -40,16 +41,16 @@ class VGG(Pruneable):
             # self.Linear(512, 512),
             # nn.ReLU(True),
             # self.Linear(512, 10),
-            self.Linear(512, 512),  # 512 * 7 * 7 in the original VGG
+            ('fc1', self.Linear(512, 512)),  # 512 * 7 * 7 in the original VGG
             # nn.LeakyReLU(leak, True),
-            nn.ReLU(True),
-            nn.BatchNorm1d(512),  # instead of dropout
-            self.Linear(512, 512),
+            ('relu1', nn.ReLU(True)),
+            ('bn1', nn.BatchNorm1d(512)),  # instead of dropout
+            ('fc2', self.Linear(512, 512)),
             # nn.LeakyReLU(leak, True),
-            nn.ReLU(True),
-            nn.BatchNorm1d(512),  # instead of dropout
-            self.Linear(512, num_classes),
-        )
+            ('relu2', nn.ReLU(True)),
+            ('bn2', nn.BatchNorm1d(512)),  # instead of dropout
+            ('fc3', self.Linear(512, num_classes)),
+        ]))
         if init_weights:
             self._initialize_weights()
 
