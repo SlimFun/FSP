@@ -76,7 +76,7 @@ parser.add_argument('--clip_grad', default=False, action='store_true', dest='cli
 parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net'),
                     default='VGG11_BN', help='Dataset to use')
 
-parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP'),
+parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP', 'layer_base_SNIP'),
                     default='None', help='Dataset to use')
 parser.add_argument('--prune_at_first_round', default=False, action='store_true', dest='prune_at_first_round')
 parser.add_argument('--keep_ratio', type=float, default=0.0,
@@ -93,6 +93,9 @@ parser.add_argument('--partition_alpha', type=float, default=0.5, metavar='PA',
                     help='partition alpha (default: 0.5)')
 
 parser.add_argument('--target_keep_ratio', default=0.1, type=float, help='server target keep ratio')
+
+parser.add_argument('--num_pruning_steps', type=int, help='total number of pruning steps')
+parser.add_argument('--pruning_steps_decay_mode', type=str, default='linear', choices=('linear', 'exp'), help='pruning steps decay mode')
 
 random.seed(0)
 np.random.seed(0)
@@ -145,6 +148,9 @@ def main(args):
         client_ids.append(i)
         torch.cuda.empty_cache()
 
+    if args.prune_strategy not in ['Iter-SNIP', 'layer_base_SNIP']:
+        assert args.num_pruning_steps == 1, 'Non Iter pruning method num_pruning_steps must be 1'
+
 
     server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy, target_keep_ratio=args.target_keep_ratio)
     # server = Server(vgg11_bn, devices[0])
@@ -153,12 +159,66 @@ def main(args):
     download_cost = np.zeros(len(clients))
     upload_cost = np.zeros(len(clients))
 
-    global_masks = None
+    global_masks = server.masks
     if args.prune_strategy == 'random_masks':
-        global_masks = server.generate_random_masks(sparsity=1-args.target_keep_ratio)
+        global_masks = server.generate_random_masks(sparsity=1-args.target_keep_ratio, sparsity_distribution='erk')
         # server.masks is not None, will not merge and change server masks
         server.masks = global_masks
         server._prune_global_model(global_masks)
+    elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP']:
+        # target_pruning_ratio
+        if args.pruning_steps_decay_mode == 'linear':
+            keep_ratio_steps = [1 - ((x + 1) * (1 - args.target_keep_ratio) / args.num_pruning_steps) for x in range(args.num_pruning_steps)]
+            
+        elif args.pruning_steps_decay_mode == 'exp':
+            keep_ratio_steps = [np.exp(0 - ((x + 1) * (0 - np.log(args.target_keep_ratio)) / args.num_pruning_steps)) for x in range(args.num_pruning_steps)]
+
+        print('keep_ratio_steps: {}'.format(keep_ratio_steps))
+        local_sparsity = 1-args.keep_ratio
+        for keep_ratio in keep_ratio_steps:
+            keep_masks_dict = {}
+            model_list = []
+            client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
+            global_params = server.get_global_params()
+
+            for client_id in client_indices:
+                client = clients[client_id]
+
+                # need process SNAP
+                pass
+                
+                # train_result = client.train(global_params=global_params,
+                #                         sparsity=1-args.keep_ratio,
+                #                         single_shot_pruning=args.single_shot_pruning,
+                #                         test_on_each_round=True,
+                #                         clip_grad=args.clip_grad,
+                #                         global_sparsity=server.model.sparsity_percentage(),
+                #                         global_masks=global_masks)
+                train_result = client.local_mask(global_params=global_params, sparsity=local_sparsity, global_masks=global_masks)
+
+                cl_mask_prarms = train_result['mask']
+                download_cost[client_id] = train_result['dl_cost']
+                upload_cost[client_id] = train_result['ul_cost']
+
+                keep_masks_dict[client_id] = cl_mask_prarms
+                # print(client.train_size)
+            server.target_keep_ratio = keep_ratio
+            server.merge_masks(keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks=global_masks)
+
+            # only keep 10% of pruned_global_model. e.g. 1 - 0.23 * 0.1, 1 - 0.56 * 0.1
+            # local_sparsity = (1-args.keep_ratio) * keep_ratio
+            local_sparsity = 1 - args.keep_ratio * keep_ratio
+            
+            global_masks = server.masks
+            server._prune_global_model(server.masks)
+            print('server masked {}% params'.format(server.masked_percent() * 100))
+        
+    # server._prune_global_model(server.masks)
+    
+    torch.save(server.model, 'server_model.pt')
+    torch.save(server.masks, 'server_masks.pt')
+    # 1/0
+
     # server.init_global_model()
     for round in range(args.rounds):
         keep_masks_dict = {}
@@ -194,7 +254,7 @@ def main(args):
 
         server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times)
 
-        global_masks = server.masks
+        # global_masks = server.masks
 
         print('server masked {}% params'.format(server.masked_percent() * 100))
         # yield DebugInfo('', (server))

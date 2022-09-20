@@ -107,6 +107,43 @@ class Client:
     def get_net_params(self):
         return self.net.cpu().state_dict()
 
+    def local_mask(self, global_params=None, sparsity=0, global_masks=None):
+        ul_cost = 0.
+        dl_cost = 0.
+
+        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
+            print(f'client: {self.id} **************')
+                
+            # self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
+            prune_criterion = SNIP.SNIP(model=self.net, device=self.device)
+            prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data, last_masks=global_masks, layer_based=self.prune_strategy=='layer_base_SNIP')
+            self.pruned = True
+            # self.record_keep_masks(keep_masks)
+
+            # self.net.mask = [m for m in self.net.mask.values()]
+            local_mask = [m for m in self.net.mask.values()]
+            # transmit local masks
+            ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size()
+
+            ret = dict(state=None, running_loss=None, mask=local_mask, ul_cost=ul_cost, dl_cost=dl_cost)
+            # handlers = apply_prune_mask(self.net, self.net.mask)
+            return ret
+        # elif self.prune_strategy == 'SNAP':
+        #     if not self.pruned:
+        #         prune_criterion = SNAP.SNAP(model=self.net, device=self.device)
+        #         neural_masks = prune_criterion.prune(percentage=sparsity, train_loader=self.train_data)
+
+        #         self.net.mask = neural_masks
+        #         ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size() * 32
+
+        #         ret = dict(state=None, running_loss=None, mask=neural_masks, ul_cost=ul_cost, dl_cost=dl_cost)
+        #         self.pruned = True
+        #         return ret
+        #     self.net.init_param_sizes()
+        #     dl_cost += self.net.param_size
+        elif self.prune_strategy == 'SNAP':
+            pass
+
     def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False, test_on_each_round=False, clip_grad=False, global_sparsity=None, global_masks=None):
         '''Train the client network for a single round.'''
 
@@ -114,24 +151,24 @@ class Client:
         dl_cost = 0
 
         handlers = None
-        if self.prune_strategy == 'SNIP':
-            if not (self.prune_at_first_round and self.pruned):
-                print(f'client: {self.id} **************')
+        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
+            # if not (self.prune_at_first_round and self.pruned):
+            #     print(f'client: {self.id} **************')
             
-                # self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
-                prune_criterion = SNIP.SNIP(model=self.net, device=self.device)
-                prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data)
-                self.pruned = True
-                # self.record_keep_masks(keep_masks)
+            #     # self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
+            #     prune_criterion = SNIP.SNIP(model=self.net, device=self.device)
+            #     prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data)
+            #     self.pruned = True
+            #     # self.record_keep_masks(keep_masks)
 
-                self.net.mask = [m for m in self.net.mask.values()]
-                # transmit local masks
-                ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size()
+            #     self.net.mask = [m for m in self.net.mask.values()]
+            #     # transmit local masks
+            #     ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size()
 
-                if single_shot_pruning:
-                    ret = dict(state=None, running_loss=None, mask=copy.deepcopy(self.net.mask), ul_cost=ul_cost, dl_cost=dl_cost)
-                    # handlers = apply_prune_mask(self.net, self.net.mask)
-                    return ret
+            #     if single_shot_pruning:
+            #         ret = dict(state=None, running_loss=None, mask=copy.deepcopy(self.net.mask), ul_cost=ul_cost, dl_cost=dl_cost)
+            #         # handlers = apply_prune_mask(self.net, self.net.mask)
+            #         return ret
 
                 # handlers = apply_prune_mask(self.net, self.net.mask)
             # single shot snip pruning
@@ -240,7 +277,7 @@ class Client:
 
         zero_params_percetage = count_model_zero_params(finish_params)
         print(f'client {self.id} finish params zeros: {zero_params_percetage}')
-        if self.prune_strategy == 'SNIP':
+        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
             ul_cost += (1-self.net.sparsity_percentage()) * self.net.param_size
         elif self.prune_strategy == 'None':
             ul_cost += self.net.param_size

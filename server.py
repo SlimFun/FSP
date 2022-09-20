@@ -7,6 +7,8 @@ import torch
 import SNAP
 import torch.nn as nn
 from models.vgg import VGG
+import math
+import random
 
 import wandb
 
@@ -17,7 +19,7 @@ class Server:
     def __init__(self, model, device, train_data=None, prune_strategy='None', target_keep_ratio=1.) -> None:
         self.device = device
         self.model = model(self.device).to(self.device)
-        self.masks = None
+        self._init_masks()
         self.train_data = train_data
         self.pruned = False
 
@@ -27,6 +29,33 @@ class Server:
         self.target_keep_ratio = target_keep_ratio
         self.vote = None
         # torch.save(self.model.state_dict(), 'ori_init_model.pt')
+
+    def _init_masks(self):
+        masks = []
+        with torch.no_grad():
+            if isinstance(self.model, VGG):
+                for name, layer in self.model.named_children():
+                    for n, l in layer.named_children():
+                        if not (isinstance(l, nn.Conv2d) or isinstance(l, nn.Linear)):
+                            continue
+
+                        for pname, param in l.named_parameters():
+                            if not needs_mask(pname):
+                                continue
+                            
+                            mask = torch.ones_like(param.data)
+                            print('params.data.shape: {}; mask.shape: {}'.format(param.data.shape, mask.shape))
+                            masks.append(mask)
+            else:
+                for name, layer in self.model.named_children():
+                    for pname, param in layer.named_parameters():
+                        if not needs_mask(pname):
+                            continue
+
+                        mask = torch.ones_like(param.data)
+                        masks.append(mask)
+
+        self.masks = masks
 
     def get_global_params(self):
         return self.model.cpu().state_dict()
@@ -220,10 +249,13 @@ class Server:
             if self._count_vote(keep_masks, vote) <= self.target_keep_ratio:
                 return vote
 
-    def keep_topk_masks(self, masks):
+    def keep_topk_masks(self, masks, last_masks):
         flat_masks = torch.cat([m.flatten() for m in masks])
-        keep_num = len(flat_masks) * self.target_keep_ratio
-        _, indices = flat_masks.topk(int(keep_num))
+        flat_last_masks = torch.cat([m.flatten() for m in last_masks])
+        flat_masks[flat_last_masks == 0] = -1
+        keep_num = math.ceil(len(flat_masks) * self.target_keep_ratio) if random.random() > 0.5 else math.floor(len(flat_masks) * self.target_keep_ratio)
+        thd, indices = flat_masks.topk(keep_num)
+        print(f'threshold : {thd[-1]}')
         topk_masks = torch.zeros_like(flat_masks)
         topk_masks[indices] = 1
         idx = 0
@@ -234,7 +266,35 @@ class Server:
             ms.append(m)
         return ms
 
-    def _merge_local_masks(self, keep_masks_dict):
+    def keep_topk_masks_with_erk(self, masks, last_masks):
+        weights_by_layer = list(self._weights_by_layer(1 - self.target_keep_ratio, sparsity_distribution='erk').values())
+        ret = []
+        idx = 0
+        for num_of_keep in weights_by_layer:
+            masks[idx][last_masks[idx] == 0] = -1
+            flat_masks = masks[idx].flatten()
+            # print(num_of_keep / m.numel())
+            thd, indices = flat_masks.topk(math.ceil(num_of_keep) if random.random() > 0.5 else math.floor(num_of_keep))
+            print(f'flat_masks.shape: {flat_masks.shape}; threshold : {thd[-1]}')
+            topk_masks = torch.zeros_like(flat_masks)
+            topk_masks[indices] = 1
+            ret.append(topk_masks.reshape(masks[idx].shape))
+            idx += 1
+        return ret
+        # flat_masks = torch.cat([m.flatten() for m in masks])
+        # keep_num = math.ceil(len(flat_masks) * self.target_keep_ratio) if random.random() > 0.5 else math.floor(len(flat_masks) * self.target_keep_ratio)
+        # _, indices = flat_masks.topk(keep_num)
+        # topk_masks = torch.zeros_like(flat_masks)
+        # topk_masks[indices] = 1
+        # idx = 0
+        # ms = []
+        # for i in range(len(masks)):
+        #     m = topk_masks[idx:idx+masks[i].numel()].reshape(masks[i].size())
+        #     idx += masks[i].numel()
+        #     ms.append(m)
+        # return ms
+
+    def _merge_local_masks(self, keep_masks_dict, last_masks):
     #keep_masks_dict[clients][params]
         print('merge local masks')
         for m in range(len(keep_masks_dict[0])):
@@ -242,46 +302,12 @@ class Server:
             # for j in range(0, len(keep_masks_dict.keys())):
                 if client_id != 0:
                     keep_masks_dict[0][m] += keep_masks_dict[client_id][m]
-        # for i in range(len(keep_masks_dict[0])):
-        #     for j in range(1, len(keep_masks_dict.keys())):
-        #         # params = self.keep_masks_dict[0][j].to('cpu')
-        #         keep_masks_dict[0][i] += keep_masks_dict[j][i]
-        #         if j == len(self.keep_masks_dict.keys())-1:
-        #             diff = self.keep_masks_dict[0][i].view(-1).cpu().numpy()
-        #             self.keep_masks_dict[0][i] = np.where(diff, 0, 1)
-        # print(f'Counter : {Counter(keep_masks_dict[0])}')
-        # zero_c = 0.
-        # total = 0.
 
-        # self.vote = self.decide_vote_num(keep_masks_dict[0])
-        # for i in range(len(keep_masks_dict[0])):
-        #     keep_masks_dict[0][i] = torch.where(keep_masks_dict[0][i]>=self.vote, 1, 0)
-
-        keep_masks_dict[0] = self.keep_topk_masks(keep_masks_dict[0])
-
-        # for m in keep_masks_dict[0]:
-        #     print(m.shape)
-        #     a = m.view(-1).to(device='cpu', copy=True)
-        #     # zero_c +=sum(np.where(a, 0, 1))
-        #     a = torch.where(a>=4, 1, 0)
-        #     zero_c +=sum(np.where(a.numpy(), 0, 1))
-        #     total += m.numel()
-
-        # print(f'zeros: {zero_c / total}, zero_c: {zero_c}; total: {total}')
-        # 1/0
+        keep_masks_dict[0] = self.keep_topk_masks(keep_masks_dict[0], last_masks)
 
         if self.prune_strategy == 'SNAP':
             for i in range(len(keep_masks_dict[0])):
                 keep_masks_dict[0][i] = torch.where(keep_masks_dict[0][i]>=6, 1, 0)
-
-
-        # zero_c = 0.
-        # total = 0.
-        # for m in keep_masks_dict[0]:
-        #     a = m.view(-1).to(device='cpu', copy=True).numpy()
-        #     zero_c +=sum(np.where(a, 0, 1))
-        #     total += m.numel()
-        # print(f'global zeros: {zero_c / total}, zero_c: {zero_c}; total: {total}')
         
         return keep_masks_dict[0]
 
@@ -315,7 +341,41 @@ class Server:
             a = param.view(-1).to(device='cpu', copy=True).numpy()
             pruned_c +=sum(np.where(a, 0, 1))
             total += param.numel()
+        # for m in self.masks:
+        #     a = m.view(-1).to(device='cpu', copy=True).numpy()
+        #     pruned_c += sum(np.where(a, 0, 1))
+        #     total += m.numel()
         return pruned_c / total
+
+    def merge_masks(self, keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks):
+        self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
+        self.compute_time += self.round_compute_time(compute_times)
+
+        # print(f'keep masks dict[0]: {keep_masks_dict[0]}')
+        assert keep_masks_dict[0] is not None, 'pruning stage local keep masks can not be None'
+        # if (keep_masks_dict[0] is not None):
+        # if self.masks is None:
+        self.masks = self._merge_local_masks(keep_masks_dict, last_masks)
+            # self.model.mask = self.masks
+
+        # applyed_masks = copy.deepcopy(self.masks)
+        # for i in range(len(applyed_masks)):
+        #     applyed_masks[i] = applyed_masks[i].cpu().numpy().tolist()
+        # with open(f'./applyed_masks.txt', 'a+') as f:
+        #     f.write(json.dumps(applyed_masks))
+        #     f.write('\n')
+
+        # if self.prune_strategy in ['SNIP', 'Iter-SNIP']:
+        #     self._prune_global_model(self.masks)
+        # elif self.prune_strategy == 'SNAP':
+        #     if not self.pruned:
+        #         print('global model prune')
+        #         # self.model = self.model.to(self.device)
+        #         SNAP.SNAP(model=self.model, device=self.device).prune_global_model(self.masks, self.train_data)
+        #         self.pruned = True
+        self.model.mask = self.masks
+
+
 
     def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times):
         self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
@@ -342,29 +402,7 @@ class Server:
                 # last_params[name] = last_params[name].type_as(averaged_params[name])
                 last_params[name] += averaged_params[name]
             self.set_global_params(last_params)
-
-        # print(f'keep masks dict[0]: {keep_masks_dict[0]}')
-        if (keep_masks_dict[0] is not None):
-            if self.masks is None:
-                self.masks = self._merge_local_masks(keep_masks_dict)
-                # self.model.mask = self.masks
-
-            # applyed_masks = copy.deepcopy(self.masks)
-            # for i in range(len(applyed_masks)):
-            #     applyed_masks[i] = applyed_masks[i].cpu().numpy().tolist()
-            # with open(f'./applyed_masks.txt', 'a+') as f:
-            #     f.write(json.dumps(applyed_masks))
-            #     f.write('\n')
-            if self.prune_strategy == 'SNIP':
-                self._prune_global_model(self.masks)
-            elif self.prune_strategy == 'SNAP':
-                if not self.pruned:
-                    print('global model prune')
-                    # self.model = self.model.to(self.device)
-                    SNAP.SNAP(model=self.model, device=self.device).prune_global_model(self.masks, self.train_data)
-                    self.pruned = True
-            self.model.mask = self.masks
-        
+  
 
     def test_global_model_on_all_client(self, clients, round):
         # pruned_c = 0.0

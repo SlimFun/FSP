@@ -364,13 +364,13 @@ def apply_grad_mask(net, keep_masks):
             layer, nn.Linear), net.modules())
 
 
-    for mask in keep_masks:
-        print(mask.shape)
+    # for mask in keep_masks:
+    #     print(mask.shape)
 
     handles = []
 
     for layer, keep_mask in zip(prunable_layers, keep_masks):
-        print('layer.shape: {}; mask.shape: {}'.format(layer.weight.shape, keep_mask.shape))
+        # print('layer.shape: {}; mask.shape: {}'.format(layer.weight.shape, keep_mask.shape))
         assert (layer.weight.shape == keep_mask.shape)
         # print(layer.weight.shape)
 
