@@ -25,34 +25,38 @@ class VGG(Pruneable):
     ) -> None:
         super(VGG, self).__init__(device=device)
         self.features = features
-        # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        # self.classifier = nn.Sequential(OrderedDict([
+        #     # nn.Linear(512 * 7 * 7, 4096),
+        #     # nn.ReLU(True),
+        #     # nn.Dropout(),
+        #     # nn.Linear(4096, 4096),
+        #     # nn.ReLU(True),
+        #     # nn.Dropout(),
+        #     # nn.Linear(4096, num_classes),
+        #     # nn.BatchNorm1d(512),
+        #     # self.Linear(512, 512),
+        #     # nn.ReLU(True),
+        #     # nn.BatchNorm1d(512),
+        #     # self.Linear(512, 512),
+        #     # nn.ReLU(True),
+        #     # self.Linear(512, 10),
+        #     ('fc1', self.Linear(512, 512)),  # 512 * 7 * 7 in the original VGG
+        #     # nn.LeakyReLU(leak, True),
+        #     # ('relu1', nn.ReLU(True)),
+        #     ('bn1', nn.BatchNorm1d(512)),  # instead of dropout
+        #     ('fc2', self.Linear(512, 512)),
+        #     # nn.LeakyReLU(leak, True),
+        #     # ('relu2', nn.ReLU(True)),
+        #     ('bn2', nn.BatchNorm1d(512)),  # instead of dropout
+        #     ('fc3', self.Linear(512, num_classes)),
+        # ]))
+        # self.classifier = nn.Linear(512, num_classes)
         self.classifier = nn.Sequential(OrderedDict([
-            # nn.Linear(512 * 7 * 7, 4096),
-            # nn.ReLU(True),
-            # nn.Dropout(),
-            # nn.Linear(4096, 4096),
-            # nn.ReLU(True),
-            # nn.Dropout(),
-            # nn.Linear(4096, num_classes),
-            # nn.BatchNorm1d(512),
-            # self.Linear(512, 512),
-            # nn.ReLU(True),
-            # nn.BatchNorm1d(512),
-            # self.Linear(512, 512),
-            # nn.ReLU(True),
-            # self.Linear(512, 10),
-            ('fc1', self.Linear(512, 512)),  # 512 * 7 * 7 in the original VGG
-            # nn.LeakyReLU(leak, True),
-            ('relu1', nn.ReLU(True)),
-            ('bn1', nn.BatchNorm1d(512)),  # instead of dropout
-            ('fc2', self.Linear(512, 512)),
-            # nn.LeakyReLU(leak, True),
-            ('relu2', nn.ReLU(True)),
-            ('bn2', nn.BatchNorm1d(512)),  # instead of dropout
-            ('fc3', self.Linear(512, num_classes)),
+            ('fc1', nn.Linear(512, num_classes)),
         ]))
-        if init_weights:
-            self._initialize_weights()
+        # if init_weights:
+        #     self._initialize_weights()
 
         self.init_param_sizes()
 

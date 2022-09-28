@@ -252,50 +252,6 @@ class SNIP(General):
             self.model.mask[name] = ranks[start_idx:start_idx + g.numel()].reshape(g.shape)
             start_idx += g.numel()
 
-    def get_average_gradients(self, net, train_dataloader, device, num_batches=-1):
-        """
-        Function to compute gradients and average them over several batches.
-        
-        num_batches: Number of batches to be used to approximate the gradients. 
-                    When set to -1, uses the whole training set.
-        
-        Returns a list of tensors, with gradients for each prunable layer.
-        """
-        
-        # Prepare list to store gradients
-        gradients = []
-        for layer in net.modules():
-            # Select only prunable layers
-            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                gradients.append(0)
-        
-        # Take a whole epoch
-        count_batch = 0
-        for batch_idx in range(len(train_dataloader)):
-            inputs, targets = next(iter(train_dataloader))
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            
-            # Compute gradients (but don't apply them)
-            net.zero_grad()
-            outputs = net.forward(inputs)
-            loss = F.nll_loss(outputs, targets)
-            loss.backward()
-            
-            # Store gradients
-            counter = 0
-            for layer in net.modules():
-                # Select only prunable layers
-                if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                    gradients[counter] += layer.weight.grad
-                    counter += 1
-            count_batch += 1
-            if batch_idx == num_batches - 1:
-                break
-        avg_gradients = [x / count_batch for x in gradients] 
-            
-        return avg_gradients
-
     def get_weight_saliencies(self, train_loader, last_masks):
 
         inputs, targets = next(iter(train_loader))

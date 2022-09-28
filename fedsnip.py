@@ -76,7 +76,7 @@ parser.add_argument('--clip_grad', default=False, action='store_true', dest='cli
 parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net'),
                     default='VGG11_BN', help='Dataset to use')
 
-parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP', 'layer_base_SNIP'),
+parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp'),
                     default='None', help='Dataset to use')
 parser.add_argument('--prune_at_first_round', default=False, action='store_true', dest='prune_at_first_round')
 parser.add_argument('--keep_ratio', type=float, default=0.0,
@@ -96,6 +96,8 @@ parser.add_argument('--target_keep_ratio', default=0.1, type=float, help='server
 
 parser.add_argument('--num_pruning_steps', type=int, help='total number of pruning steps')
 parser.add_argument('--pruning_steps_decay_mode', type=str, default='linear', choices=('linear', 'exp'), help='pruning steps decay mode')
+parser.add_argument('--saliency_mode', type=str, choices=('saliency', 'mask'))
+parser.add_argument('--sparsity_distribution', type=str, choices=('erk', 'uniform'), default='uniform')
 
 random.seed(0)
 np.random.seed(0)
@@ -148,7 +150,7 @@ def main(args):
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    if args.prune_strategy not in ['Iter-SNIP', 'layer_base_SNIP']:
+    if args.prune_strategy not in ['Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
         assert args.num_pruning_steps == 1, 'Non Iter pruning method num_pruning_steps must be 1'
 
 
@@ -161,11 +163,11 @@ def main(args):
 
     global_masks = server.masks
     if args.prune_strategy == 'random_masks':
-        global_masks = server.generate_random_masks(sparsity=1-args.target_keep_ratio, sparsity_distribution='erk')
+        global_masks = server.generate_random_masks(sparsity=1-args.target_keep_ratio, sparsity_distribution=args.sparsity_distribution)
         # server.masks is not None, will not merge and change server masks
         server.masks = global_masks
         server._prune_global_model(global_masks)
-    elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP']:
+    elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
         # target_pruning_ratio
         if args.pruning_steps_decay_mode == 'linear':
             keep_ratio_steps = [1 - ((x + 1) * (1 - args.target_keep_ratio) / args.num_pruning_steps) for x in range(args.num_pruning_steps)]
@@ -181,6 +183,8 @@ def main(args):
             client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
             global_params = server.get_global_params()
 
+            num_training_data = [0 for _ in range(len(client_indices))]
+
             for client_id in client_indices:
                 client = clients[client_id]
 
@@ -194,16 +198,20 @@ def main(args):
                 #                         clip_grad=args.clip_grad,
                 #                         global_sparsity=server.model.sparsity_percentage(),
                 #                         global_masks=global_masks)
-                train_result = client.local_mask(global_params=global_params, sparsity=local_sparsity, global_masks=global_masks)
+                train_result = client.local_mask(global_params=global_params, sparsity=local_sparsity, global_masks=global_masks, saliency_mode=args.saliency_mode)
 
                 cl_mask_prarms = train_result['mask']
                 download_cost[client_id] = train_result['dl_cost']
                 upload_cost[client_id] = train_result['ul_cost']
 
                 keep_masks_dict[client_id] = cl_mask_prarms
+                num_training_data[client_id] = client.train_size
                 # print(client.train_size)
             server.target_keep_ratio = keep_ratio
-            server.merge_masks(keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks=global_masks)
+            # yield keep_masks_dict
+            if args.saliency_mode == 'mask':
+                num_training_data = None
+            server.merge_masks(keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks=global_masks, num_training_data=num_training_data)
 
             # only keep 10% of pruned_global_model. e.g. 1 - 0.23 * 0.1, 1 - 0.56 * 0.1
             # local_sparsity = (1-args.keep_ratio) * keep_ratio

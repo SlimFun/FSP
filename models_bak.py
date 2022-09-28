@@ -16,7 +16,7 @@ import warnings
 # Utility functions
 
 def needs_mask(name):
-    return name.endswith('weight')
+    return name.endswith('weight') and ('bn' not in name)
 
 
 def initialize_mask(model, dtype=torch.bool):
@@ -32,7 +32,11 @@ def initialize_mask(model, dtype=torch.bool):
     #                         )
     #                     layer.register_buffer(name + '_mask', torch.ones_like(param, dtype=dtype))
     # else:
-    layers_to_prune = (layer for _, layer in model.named_children())
+    # layers_to_prune = (layer for _, layer in model.named_children())
+    layers_to_prune = []
+    for name, layer in model.named_children():
+        if 'bn' not in name:
+            layers_to_prune.append(layer)
     for layer in layers_to_prune:
         for name, param in layer.named_parameters():
             if name.endswith('weight'):
@@ -453,7 +457,6 @@ class PrunableNet(nn.Module):
 
                 mask_name = name + '_mask'
                 if needs_mask(name) and mask_name in apply_mask_source:
-
                     mask_to_apply = apply_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     mask_to_copy = copy_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     gpu_param = param[mask_to_apply].to(self.device)
@@ -474,6 +477,11 @@ class PrunableNet(nn.Module):
 
                     if mask_name not in local_state or not torch.equal(local_state[mask_name], mask_to_copy):
                         mask_changed = True
+                    # if torch.equal(global_state[mask_name].to(device=self.device, dtype=torch.bool), local_state[mask_name].to(device=self.device, dtype=torch.bool)):
+                    #     # print('torch.equal')
+                    #     print(global_state[mask_name])
+                    #     print('#'*10)
+                    #     print(local_state[mask_name])
                 else:
                     # biases and other unmasked things
                     gpu_param = param.to(self.device)
@@ -752,16 +760,16 @@ class VGG11_BN(PrunableNet):
         self.conv8 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         self.bn8 = nn.BatchNorm2d(512)
 
-        self.fc1 = nn.Linear(512, 512)
-        self.bn9 = nn.BatchNorm1d(512)
+        # self.fc1 = nn.Linear(512, 512)
+        # self.bn9 = nn.BatchNorm1d(512)
 
-        self.fc2 = nn.Linear(512, 512)
-        self.bn10 = nn.BatchNorm1d(512)
+        # self.fc2 = nn.Linear(512, 512)
+        # self.bn10 = nn.BatchNorm1d(512)
 
         self.fc3 = nn.Linear(512, num_classes)
 
-        if init_weights:
-            self._initialize_weights()
+        # if init_weights:
+        #     self._initialize_weights()
 
         self.init_param_sizes()
 
@@ -776,10 +784,10 @@ class VGG11_BN(PrunableNet):
         x = F.max_pool2d(F.relu(self.bn8(self.conv8(x)), inplace=True), kernel_size=2, stride=2)
         x = x.view(x.size(0), -1)
 
-        x = self.bn9(F.relu(self.fc1(x), inplace=True))
-        x = self.bn10(F.relu(self.fc2(x), inplace=True))
-        x = F.softmax(self.fc3(x), dim=1)
-        # x = self.fc3(x)
+        # x = self.bn9(F.relu(self.fc1(x), inplace=True))
+        # x = self.bn10(F.relu(self.fc2(x), inplace=True))
+        # x = F.softmax(self.fc3(x), dim=1)
+        x = self.fc3(x)
         return x
 
     def _initialize_weights(self) -> None:

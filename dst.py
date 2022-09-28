@@ -427,7 +427,7 @@ for server_round in tqdm(range(args.rounds)):
     # print(clients)
 
     # sample clients
-    client_indices = rng.choice(list(clients.keys()), size=args.clients)
+    client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
     # client_indices = [i for i in range(len(clients))]
 
     global_params = global_model.state_dict()

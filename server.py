@@ -13,7 +13,7 @@ import random
 import wandb
 
 def needs_mask(layer_name):
-    return layer_name.endswith('weight')
+    return layer_name.endswith('weight') and ('bn' not in layer_name)
 
 class Server:
     def __init__(self, model, device, train_data=None, prune_strategy='None', target_keep_ratio=1.) -> None:
@@ -252,6 +252,7 @@ class Server:
     def keep_topk_masks(self, masks, last_masks):
         flat_masks = torch.cat([m.flatten() for m in masks])
         flat_last_masks = torch.cat([m.flatten() for m in last_masks])
+        print(f'{flat_last_masks.shape} == {flat_masks.shape}')
         flat_masks[flat_last_masks == 0] = -1
         keep_num = math.ceil(len(flat_masks) * self.target_keep_ratio) if random.random() > 0.5 else math.floor(len(flat_masks) * self.target_keep_ratio)
         thd, indices = flat_masks.topk(keep_num)
@@ -294,14 +295,19 @@ class Server:
         #     ms.append(m)
         # return ms
 
-    def _merge_local_masks(self, keep_masks_dict, last_masks):
+    def _merge_local_masks(self, keep_masks_dict, last_masks, num_training_data):
     #keep_masks_dict[clients][params]
+        total_training_data = sum(num_training_data) if num_training_data != None else 0.
         print('merge local masks')
         for m in range(len(keep_masks_dict[0])):
             for client_id in keep_masks_dict.keys():
+                w = float(num_training_data[client_id]) / total_training_data if num_training_data != None else 1.
+                print(f'merge mask weight: {w}')
             # for j in range(0, len(keep_masks_dict.keys())):
-                if client_id != 0:
-                    keep_masks_dict[0][m] += keep_masks_dict[client_id][m]
+                if client_id == 0:
+                    keep_masks_dict[0][m] = keep_masks_dict[client_id][m] * w
+                else:
+                    keep_masks_dict[0][m] += keep_masks_dict[client_id][m] * w
 
         keep_masks_dict[0] = self.keep_topk_masks(keep_masks_dict[0], last_masks)
 
@@ -347,7 +353,7 @@ class Server:
         #     total += m.numel()
         return pruned_c / total
 
-    def merge_masks(self, keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks):
+    def merge_masks(self, keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks, num_training_data=None):
         self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
         self.compute_time += self.round_compute_time(compute_times)
 
@@ -355,7 +361,7 @@ class Server:
         assert keep_masks_dict[0] is not None, 'pruning stage local keep masks can not be None'
         # if (keep_masks_dict[0] is not None):
         # if self.masks is None:
-        self.masks = self._merge_local_masks(keep_masks_dict, last_masks)
+        self.masks = self._merge_local_masks(keep_masks_dict, last_masks, num_training_data)
             # self.model.mask = self.masks
 
         # applyed_masks = copy.deepcopy(self.masks)

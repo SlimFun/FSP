@@ -19,6 +19,7 @@ import SNIP
 import SNAP
 from utils import apply_global_mask, apply_prune_mask, compare_model, count_model_zero_params, apply_grad_mask
 import wandb
+from grasp import Grasp
 
 import random
 import numpy as np
@@ -107,16 +108,17 @@ class Client:
     def get_net_params(self):
         return self.net.cpu().state_dict()
 
-    def local_mask(self, global_params=None, sparsity=0, global_masks=None):
+    def local_mask(self, global_params=None, sparsity=0, global_masks=None, saliency_mode=None):
         ul_cost = 0.
         dl_cost = 0.
 
+        self.reset_weights(global_state_dict=global_params)
         if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
             print(f'client: {self.id} **************')
                 
             # self.keep_masks = snip.SNIP(self.net, sparsity, self.train_data, self.device)  # TODO: shuffle?
             prune_criterion = SNIP.SNIP(model=self.net, device=self.device)
-            prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data, last_masks=global_masks, layer_based=self.prune_strategy=='layer_base_SNIP')
+            prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data, last_masks=global_masks, layer_based=self.prune_strategy=='layer_base_SNIP', saliency_mode=saliency_mode)
             self.pruned = True
             # self.record_keep_masks(keep_masks)
 
@@ -143,6 +145,16 @@ class Client:
         #     dl_cost += self.net.param_size
         elif self.prune_strategy == 'SNAP':
             pass
+        elif self.prune_strategy == 'Grasp':
+            prune_criterion = Grasp(model=self.net, device=self.device)
+            # local_mask = prune_criterion.prune_masks(percentage=sparsity, train_loader=self.train_data, last_masks=global_masks, saliency_mode=saliency_mode)
+            masks = prune_criterion.GraSP(ratio=sparsity, train_dataloader=self.train_data, saliency_mode=saliency_mode)
+            local_mask = [m for m in masks.values()]
+            # local_mask = masks
+
+            ul_cost += (1-self.net.sparsity_percentage()) * self.net.mask_size()
+            ret = dict(state=None, running_loss=None, mask=local_mask, ul_cost=ul_cost, dl_cost=dl_cost)
+            return ret
 
     def train(self, global_params=None, initial_global_params=None, sparsity=0, single_shot_pruning=False, test_on_each_round=False, clip_grad=False, global_sparsity=None, global_masks=None):
         '''Train the client network for a single round.'''
@@ -151,7 +163,7 @@ class Client:
         dl_cost = 0
 
         handlers = None
-        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
+        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
             # if not (self.prune_at_first_round and self.pruned):
             #     print(f'client: {self.id} **************')
             
@@ -198,7 +210,7 @@ class Client:
             # print(random_masks)
             # check_random_masks(random_masks)
             dl_cost += (1-global_sparsity) * self.net.param_size
-            handlers = apply_grad_mask(self.net, global_masks)
+            # handlers = apply_grad_mask(self.net, global_masks)
 
 
         
@@ -260,6 +272,7 @@ class Client:
                 # total += len(labels)
                 # if self.check_prunable():
                 #     self.net.apply_weight_mask()
+                apply_global_mask(self.net, global_masks)
 
                 running_loss += loss.item()
                 # if i >= 5: 
@@ -277,7 +290,7 @@ class Client:
 
         zero_params_percetage = count_model_zero_params(finish_params)
         print(f'client {self.id} finish params zeros: {zero_params_percetage}')
-        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP']:
+        if self.prune_strategy in ['SNIP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
             ul_cost += (1-self.net.sparsity_percentage()) * self.net.param_size
         elif self.prune_strategy == 'None':
             ul_cost += self.net.param_size
