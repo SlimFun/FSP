@@ -64,7 +64,7 @@ class Server:
         masks = []
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
-            print(weights_by_layer)
+            print(f'weights_by_layer: {weights_by_layer}')
             if isinstance(self.model, VGG):
                 for name, layer in self.model.named_children():
                     for n, l in layer.named_children():
@@ -170,9 +170,12 @@ class Server:
                         if sparsity_distribution == 'er':
                             sparsities[index] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                         elif sparsity_distribution == 'erk':
-                            if isinstance(layer, nn.modules.conv._ConvNd):
+                            # print('erk')
+                            # print(l)
+                            if isinstance(l, nn.modules.conv._ConvNd):
                                 sparsities[index] = 1 - (neur_in + neur_out + np.sum(kernel_size)) / (neur_in * neur_out * np.prod(kernel_size))
                             else:
+                                # print('er')
                                 sparsities[index] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                         else:
                             raise ValueError('Unsupported sparsity distribution ' + sparsity_distribution)
@@ -181,8 +184,9 @@ class Server:
                 # Now we need to renormalize sparsities.
                 # We need global sparsity S = sum(s * n) / sum(n) equal to desired
                 # sparsity, and s[i] = C n[i]
-                print(n_weights)
+                # print(n_weights)
                 sparsities *= sparsity * np.sum(n_weights) / np.sum(sparsities * n_weights)
+                # print(f'n_weights: {n_weights}; sparsities: {sparsities}')
                 n_weights = np.floor((1-sparsities) * n_weights)
 
                 return {layer_names[i]: n_weights[i] for i in range(len(layer_names))}

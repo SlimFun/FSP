@@ -579,7 +579,8 @@ for server_round in tqdm(range(args.rounds)):
     # reset global params to aggregated values
     global_model.load_state_dict(aggregated_params_for_mask)
 
-    if global_model.sparsity() < round_sparsity:
+    # print('global_model.sparsity()')
+    if global_model.sparsity() < round_sparsity and readjustment_ratio > 0.:
         # we now have denser networks than we started with at the beginning of
         # the round. reprune on the server to get back to the desired sparsity.
         # we use layer-wise magnitude pruning as before.

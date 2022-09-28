@@ -122,8 +122,15 @@ class PrunableNet(nn.Module):
             layer_names = []
             # prune_layer_num = self.need_masked_layer_num()
             # sparsities = np.empty(prune_layer_num)
-            sparsities = np.empty(len(list(self.named_children())))
+            count = 0
+            for i, (name, layer) in enumerate(self.named_children()):
+                if not (isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)):
+                        continue
+                count += 1
+            sparsities = np.empty(count)
             n_weights = np.zeros_like(sparsities, dtype=np.int)
+            # sparsities = np.empty(len(list(self.named_children())))
+            # n_weights = np.zeros_like(sparsities, dtype=np.int)
 
             c = 0
             for i, (name, layer) in enumerate(self.named_children()):
@@ -132,7 +139,8 @@ class PrunableNet(nn.Module):
                     continue
                 layer_names.append(name)
                 for pname, param in layer.named_parameters():
-                    n_weights[c] += param.numel()
+                    if needs_mask(pname):
+                        n_weights[c] += param.numel()
 
                 if sparsity_distribution == 'uniform':
                     sparsities[c] = sparsity
@@ -147,8 +155,6 @@ class PrunableNet(nn.Module):
                 elif isinstance(layer, nn.Linear):
                     neur_out = layer.out_features
                     neur_in = layer.in_features
-                elif isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.BatchNorm1d):
-                    print('skip')
                 else:
                     raise ValueError('Unsupported layer type ' + type(layer))
 
@@ -168,6 +174,7 @@ class PrunableNet(nn.Module):
             # We need global sparsity S = sum(s * n) / sum(n) equal to desired
             # sparsity, and s[i] = C n[i]
             sparsities *= sparsity * np.sum(n_weights) / np.sum(sparsities * n_weights)
+            # print(f'n_weights: {n_weights}; sparsities: {sparsities}')
             n_weights = np.floor((1-sparsities) * n_weights)
 
             return {layer_names[i]: n_weights[i] for i in range(len(layer_names))}
@@ -185,6 +192,7 @@ class PrunableNet(nn.Module):
         #print('desired sparsity', sparsity)
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
+            print(f'weights_by_layer: {weights_by_layer}')
             for name, layer in self.named_children():
 
                 if (not isinstance(layer, nn.modules.conv._ConvNd)) and (not isinstance(layer, nn.Linear)):
@@ -566,6 +574,7 @@ class PrunableNet(nn.Module):
                 n_ones += torch.sum(buf)
                 mask_size += buf.nelement()
 
+        # print(f'keeped params: {n_ones}')
         return 1 - (n_ones / mask_size).item()
 
 

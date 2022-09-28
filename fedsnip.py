@@ -167,6 +167,10 @@ def main(args):
         # server.masks is not None, will not merge and change server masks
         server.masks = global_masks
         server._prune_global_model(global_masks)
+        keeped_num = 0
+        for m in server.masks:
+            keeped_num += torch.sum(torch.where(m>0, 1, 0))
+        print(f'keeped_num: {keeped_num}')
     elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
         # target_pruning_ratio
         if args.pruning_steps_decay_mode == 'linear':
