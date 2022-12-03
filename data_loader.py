@@ -258,9 +258,9 @@ def get_dataloader_CIFAR10(datadir, train_bs, test_bs, dataidxs=None, testidx=No
 
     logging.info(f'seed: {torch.initial_seed()}!!!!!!!')
 
-    train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, sampler=dataidxs, num_workers=8,
+    train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, sampler=dataidxs, num_workers=3,
         pin_memory=False)
-    test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, sampler=testidx, num_workers=8,
+    test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, sampler=testidx, num_workers=3,
         pin_memory=False)
 
     return train_dl, test_dl

@@ -7,8 +7,10 @@ import torch.nn.functional as F
 
 import warnings
 
-from .vgg import VGG_SNIP, vgg11_bn
+from .vgg import VGG_SNIP, vgg11_bn, vgg11, vgg4_bn
 from .Pruneable import Pruneable
+from .resnet import *
+from .conv import conv
 
 # class CNN2(PrunableNet):
 #     def __init__(self, device='cpu', in_channels=3, hidden_channels=32, num_hiddens=512, num_classes=10):
@@ -140,5 +142,9 @@ all_models = {
         'CNNNet': CNN2,
         'VGG_SNIP': VGG_SNIP,
         'VGG11_BN': vgg11_bn,
-        'CIFAR10Net': CIFAR10Net
+        'VGG11': vgg11,
+        'CIFAR10Net': CIFAR10Net,
+        'resnet18': resnet18,
+        'VGG4_BN': vgg4_bn,
+        'conv': conv,
 }

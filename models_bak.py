@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torchvision
 import prune as torch_prune
 import warnings
+from copy import deepcopy
 
 # from models.networks.assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
 
@@ -236,13 +237,14 @@ class PrunableNet(nn.Module):
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
             for name, layer in self.named_children():
-
                 if (not isinstance(layer, nn.modules.conv._ConvNd)) and (not isinstance(layer, nn.Linear)):
                     continue
                 # We need to figure out how many to grow
                 n_nonzero = 0
+                mask = None
                 for bname, buf in layer.named_buffers():
                     n_nonzero += buf.count_nonzero().item()
+                    mask = deepcopy(buf).to(dtype=torch.bool)
                 n_grow = int(weights_by_layer[name] - n_nonzero)
                 if n_grow < 0:
                     continue
@@ -252,8 +254,17 @@ class PrunableNet(nn.Module):
                     if not needs_mask(pname):
                         continue
 
+                    assert mask.shape == param.grad.shape
+                    score = deepcopy(param.grad)
+                    score[~mask] = -1
+                    # score = param.grad * mask
+                    # param.grad[]
+                    # print(f'score: {score.count_nonzero().item() / float(score.numel())}')
+
                     # Determine largest gradient indices
-                    _, grow_indices = torch.topk(torch.abs(param.grad.flatten()),
+                    # _, grow_indices = torch.topk(torch.abs(param.grad.flatten()),
+                    #                              n_grow, largest=True)
+                    _, grow_indices = torch.topk(torch.abs(score.flatten()),
                                                  n_grow, largest=True)
 
                     # Write and apply mask

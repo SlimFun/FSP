@@ -1,0 +1,34 @@
+Traceback (most recent call last):
+  File "fedsnip.py", line 27, in <module>
+    import wandb
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/wandb/__init__.py", line 32, in <module>
+    from wandb import sdk as wandb_sdk
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/wandb/sdk/__init__.py", line 7, in <module>
+    from . import wandb_helper as helper  # noqa: F401
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/wandb/sdk/wandb_helper.py", line 8, in <module>
+    from .lib import config_util
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/wandb/sdk/lib/config_util.py", line 9, in <module>
+    from wandb.util import load_yaml
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/wandb/util.py", line 33, in <module>
+    import yaml
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/yaml/__init__.py", line 8, in <module>
+    from .loader import *
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/yaml/loader.py", line 4, in <module>
+    from .reader import *
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/yaml/reader.py", line 45, in <module>
+    class Reader(object):
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/site-packages/yaml/reader.py", line 137, in Reader
+    NON_PRINTABLE = re.compile('[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010ffff]')
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/re.py", line 234, in compile
+    return _compile(pattern, flags)
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/re.py", line 286, in _compile
+    p = sre_compile.compile(pattern, flags)
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/sre_compile.py", line 768, in compile
+    code = _code(p, flags)
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/sre_compile.py", line 604, in _code
+    _compile_info(code, p, flags)
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/sre_compile.py", line 590, in _compile_info
+    charset, hascased = _optimize_charset(charset)
+  File "/home/fw/anaconda3/envs/fedml/lib/python3.7/sre_compile.py", line 311, in _optimize_charset
+    for i in r:
+KeyboardInterrupt

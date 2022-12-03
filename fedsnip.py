@@ -1,3 +1,4 @@
+from calendar import c
 from email import utils
 from pydoc import cli
 from tkinter import N
@@ -34,6 +35,9 @@ import random
 
 from data_loader import load_partition_data_cifar10
 import json
+from synflow import SynFlow
+from given_ratio import GivenRatio
+from precrop import PreCrop
 
 from server import Server
 
@@ -73,10 +77,10 @@ parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileT
 
 parser.add_argument('--clip_grad', default=False, action='store_true', dest='clip_grad')
 
-parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net'),
+parser.add_argument('--model', type=str, choices=('VGG11_BN', 'VGG4_BN', 'conv', 'VGG_SNIP', 'CNNNet', 'CIFAR10Net', 'VGG11', 'resnet18'),
                     default='VGG11_BN', help='Dataset to use')
 
-parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp'),
+parser.add_argument('--prune_strategy', type=str, choices=('None', 'SNIP', 'SNAP', 'random_masks', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp', 'PruneFL', 'Grasp_it', 'synflow', 'given', 'PreCrop'),
                     default='None', help='Dataset to use')
 parser.add_argument('--prune_at_first_round', default=False, action='store_true', dest='prune_at_first_round')
 parser.add_argument('--keep_ratio', type=float, default=0.0,
@@ -98,6 +102,8 @@ parser.add_argument('--num_pruning_steps', type=int, help='total number of pruni
 parser.add_argument('--pruning_steps_decay_mode', type=str, default='linear', choices=('linear', 'exp'), help='pruning steps decay mode')
 parser.add_argument('--saliency_mode', type=str, choices=('saliency', 'mask'))
 parser.add_argument('--sparsity_distribution', type=str, choices=('erk', 'uniform'), default='uniform')
+parser.add_argument('--structure', type=bool, help='learning rate', default=False)
+# parser.add_argument('--structure', default=False, action='store_true', dest='structure pruning for precrop')
 
 random.seed(0)
 np.random.seed(0)
@@ -142,19 +148,22 @@ def main(args):
                 config=args
             )
     
+    # bandwidths = [6.258416271626652, 4.507226300913546, 4.187671945933545, 6.943598913107767, 3.238060870886997, 6.196451247145109, 5.2628935527439, 5.931505890296285, 2.0293764981831344, 9.306951613455594]
+    # bandwidths = [9.285953083033519, 2.2928108469954855, 8.64077534072101, 7.537154100918638, 8.172905956799553, 6.814759548825874, 6.701125220920233, 8.53853786643314, 4.331648666957337, 7.707367899002411]
+    bandwidths = [9.285953083033519, 2.2928108469954855, 8.64077534072101, 7.537154100918638, 8.172905956799553, 4.814759548825874, 6.701125220920233, 8.53853786643314, 6.331648666957337, 7.707367899002411]
     for i in range(args.total_clients):
         cl = Client(id=i, device=devices[0], train_data=train_data_local_dict[i], test_data=test_data_local_dict[i], net=all_models[args.model],
-                    learning_rate=args.eta, momentum=args.momentum, weight_decay=args.l2, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round)
+                    learning_rate=args.eta, momentum=args.momentum, weight_decay=args.l2, local_epochs=args.epochs, prune_strategy=args.prune_strategy, prune_at_first_round=args.prune_at_first_round, bandwidth=bandwidths[i])
                     
         clients[i] = cl
         client_ids.append(i)
         torch.cuda.empty_cache()
 
-    if args.prune_strategy not in ['Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
+    if args.prune_strategy not in ['Iter-SNIP', 'layer_base_SNIP', 'Grasp', 'Grasp_it', 'synflow', 'None']:
         assert args.num_pruning_steps == 1, 'Non Iter pruning method num_pruning_steps must be 1'
 
 
-    server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy, target_keep_ratio=args.target_keep_ratio)
+    server = Server(all_models[args.model], devices[0], train_data_local_dict[0], prune_strategy=args.prune_strategy, target_keep_ratio=args.target_keep_ratio, clients=clients)
     # server = Server(vgg11_bn, devices[0])
     print(f'server model param size: {server.model.param_size}')
     compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
@@ -171,7 +180,145 @@ def main(args):
         for m in server.masks:
             keeped_num += torch.sum(torch.where(m>0, 1, 0))
         print(f'keeped_num: {keeped_num}')
-    elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp']:
+    elif args.prune_strategy == 'synflow':
+        model = all_models['VGG11'](devices[0]).to(devices[0])
+        prune_criterion = SynFlow(model=model, device=server.device)
+        masks = prune_criterion.prune_masks(ratio=args.target_keep_ratio, train_dataloader=clients[0].train_data, epochs=args.num_pruning_steps, pruning_schedule='exp')
+        # server.masks = [m for m in masks.values()]
+        server.masks = masks
+        global_masks = server.masks
+        for m in server.masks:
+            print(f'{m.mean()}, {m.shape}')
+        server._prune_global_model(server.masks)
+        print('server masked {}% params'.format(server.masked_percent() * 100))
+    elif args.prune_strategy == 'given':
+        prune_criterion = GivenRatio(model=server.model, device=server.device)
+        masks = prune_criterion.prune_masks(ratio=args.target_keep_ratio, train_dataloader=clients[0].train_data, epochs=args.num_pruning_steps, pruning_schedule='exp')
+        server.masks = masks
+        global_masks = server.masks
+        for m in server.masks:
+            print(f'{m.mean()}, {m.shape}')
+        server._prune_global_model(server.masks)
+        print('server masked {}% params'.format(server.masked_percent() * 100))
+    elif args.prune_strategy == 'PreCrop':
+        prune_criterion = PreCrop(model=server.model, device=server.device, arch=args.model)
+        if args.structure:
+            
+            output_channels = {}
+            # output_channels = {0: [64, 114, 140, 188, 244, 310, 279, 512],
+            #                     1: [64, 128, 143, 204, 154, 323, 118, 512],
+            #                     2: [64, 128, 191, 204, 295, 323, 292, 512],
+            #                     3: [64, 122, 140, 197, 232, 318, 248, 512],
+            #                     4: [64, 117, 140, 191, 236, 313, 260, 512],
+            #                     5: [64, 128, 206, 204, 254, 323, 211, 512],
+            #                     6: [64, 114, 136, 188, 220, 310, 229, 512],
+            #                     7: [64, 128, 204, 204, 305, 323, 293, 512],
+            #                     8: [64, 54, 113, 114, 168, 241, 173, 512],
+            #                     9: [64, 128, 142, 204, 236, 323, 252, 512]}
+            for i in clients.keys():
+                # if i in [0,1,2]:
+                #     output_channels[i] = [64, 128, 206, 204, 305, 323, 293, 512]
+                # # # # #     output_channels[i] = [64, 128, 256, 512]
+                # # # # #     # output_channels[i] = [64, 128, 205, 203, 304, 322, 292, 512]
+                # # # # #     # output_channels[i] = [64, 5, 63, 5, 63, 18, 89, 13, 125, 37, 178, 26, 255, 74, 361, 52, 511]
+                # elif i in [3,4,5]:
+                #     output_channels[i] = [64, 114, 136, 188, 220, 310, 229, 512]
+                # # # # #     # output_channels[i] = [32, 64, 128, 128, 256, 256, 256, 256]
+                # # # # #     output_channels[i] = [32, 64, 128, 256]
+                # # # # #     # output_channels[i] = [64, 113, 135, 187, 219, 309, 228, 512]
+                # # # # #     # output_channels[i] = [64, 127, 135, 203, 219, 322, 228, 512]
+                # else:
+                # # #     # output_channels[i] = [16, 32, 64, 64, 128, 128, 128, 128]
+                #     # output_channels[i] = [64, 54, 113, 114, 168, 241, 173, 512]
+                #     output_channels[i] = [64, 128, 143, 204, 154, 323, 118, 512]
+                    # output_channels[i] = [16, 32, 64, 128]
+                # output_channels[i] = [64, 128, 256, 512]
+                # output_channels[i] = [63, 63, 63, 63, 63, 114, 89, 82, 123, 59, 172, 42, 243, 29, 354, 20, 511]
+                # 0.1 FLOPs
+                # output_channels[i] = [64, 5, 63, 5, 63, 18, 89, 13, 125, 37, 178, 26, 255, 74, 361, 52, 511]
+                output_channels[i] = prune_criterion.prune_masks(ratio=args.target_keep_ratio, train_dataloader=clients[0].train_data, structure=args.structure, epochs=args.num_pruning_steps, pruning_schedule='exp', client=clients[i])
+                # output_channels[i] = [64, 128, 256, 256, 512, 512, 512, 512]
+                # output_channels[i] = [64, 127, 94, 203, 59, 322, 37, 512]
+                # output_channels[i] = [63, 63, 63, 63, 63, 114, 89, 82, 123, 59, 172, 42, 243, 29, 354, 20, 511]
+                # output_channels[i] = [64, 64, 64, 64, 64, 128, 128, 128, 128, 256, 256, 256, 256, 512, 512, 512, 512]
+
+                
+            server_channels = []
+            for i in range(len(output_channels[0])):
+                sc = 0
+                for j in clients.keys():
+                    if output_channels[j][i] > sc:
+                        sc = output_channels[j][i]
+                server_channels.append(sc)
+            
+            # output_channels[9] = server_channels
+
+            for i in clients.keys():
+                print(f'client {i} output_channels: {output_channels[i]}')
+                layer_ratio = [1.] * len(output_channels[i])
+                # layer_ratio = []
+                # for j in range(len(output_channels[i])):
+                #     layer_ratio.append(output_channels[i][j] / server_channels[j])
+                print(f'client {i} layer_ratio {layer_ratio}')
+                clients[i].net = all_models[args.model](devices[0], output_channels=output_channels[i], layer_ratio=layer_ratio).to(devices[0])
+                clients[i].output_channels = output_channels[i]
+
+            server.model = all_models[args.model](devices[0], output_channels=server_channels).to(devices[0])
+            server.output_channels = server_channels
+            server.min_channels = clients[8].output_channels
+            print(f'server_channels: {server_channels}')
+
+            # 1/0
+            # output_channels = prune_criterion.prune_masks(ratio=args.target_keep_ratio, train_dataloader=clients[0].train_data, structure=args.structure, epochs=args.num_pruning_steps, pruning_schedule='exp')
+            # output_channels = [64, 122, 56, 196, 39, 317, 25, 511]
+            # server.model = all_models[args.model](devices[0], output_channels=output_channels).to(devices[0])
+            # server.output_channels = output_channels
+            # # for cl in clients.values():
+            # #     cl.net = all_models[args.model](devices[0], output_channels=output_channels).to(devices[0])
+            # # layer_ratio = [1.] * len(output_channels)
+            # # layer_ratio = []
+            # # full = [64, 128, 256, 256, 512, 512, 512, 512]
+            # # for i in range(len(output_channels)):
+            # #     layer_ratio.append(float(output_channels[i]) / full[i])
+            # for i in clients.keys():
+            #     # if i in [1,3,5,7,9]:
+            #     # if i in [0,1,2,3]:
+            # # [64, 122, 56, 196, 39, 317, 25, 511]
+            #     output_channels = [64, 122, 56, 196, 39, 317, 25, 511]
+            #     layer_ratio = [1.] * len(output_channels)
+
+            #     clients[i].net = all_models[args.model](devices[0], output_channels=output_channels, layer_ratio=layer_ratio).to(devices[0])
+            #     clients[i].output_channels = output_channels
+                # elif i in [4,5]:
+                #     output_channels = [64, 122, 56, 196, 39, 317, 25, 511]
+                #     layer_ratio = [1.] * len(output_channels)
+
+                #     clients[i].net = all_models[args.model](devices[0], output_channels=output_channels, layer_ratio=layer_ratio).to(devices[0])
+                #     clients[i].output_channels = output_channels
+                # elif i in [6,7]:
+                #     output_channels = [63, 127, 145, 203, 129, 322, 91, 512]
+                #     layer_ratio = [1.] * len(output_channels)
+
+                #     clients[i].net = all_models[args.model](devices[0], output_channels=output_channels, layer_ratio=layer_ratio).to(devices[0])
+                #     clients[i].output_channels = output_channels
+                # else:
+                #     # output_channels = [64, 128, 95, 204, 60, 322, 38, 512]
+                #     # output_channels=[64, 128, 256, 256, 512, 512, 512, 512]
+                #     output_channels = [64, 128, 177, 203, 161, 322, 114, 512]
+                #     lr = [1.] * len(output_channels)
+                #     clients[i].net = all_models[args.model](devices[0], output_channels=output_channels, layer_ratio=lr).to(devices[0])
+                #     clients[i].output_channels = output_channels
+
+        else:
+            layer_ratio = prune_criterion.prune_masks(ratio=args.target_keep_ratio, train_dataloader=clients[0].train_data, structure=args.structure, epochs=args.num_pruning_steps, pruning_schedule='exp')
+            server.masks = layer_ratio
+            global_masks = server.masks
+            for m in server.masks:
+                print(f'{m.mean()}, {m.shape}')
+            server._prune_global_model(server.masks)
+            print('server masked {}% params'.format(server.masked_percent() * 100))
+        
+    elif args.prune_strategy in ['SNIP', 'SNAP', 'Iter-SNIP', 'layer_base_SNIP', 'Grasp', 'Grasp_it']:
         # target_pruning_ratio
         if args.pruning_steps_decay_mode == 'linear':
             keep_ratio_steps = [1 - ((x + 1) * (1 - args.target_keep_ratio) / args.num_pruning_steps) for x in range(args.num_pruning_steps)]
@@ -227,16 +374,22 @@ def main(args):
         
     # server._prune_global_model(server.masks)
     
-    torch.save(server.model, 'server_model.pt')
-    torch.save(server.masks, 'server_masks.pt')
+    # torch.save(server.model, 'server_model_reorder.pt')
+    # torch.save(server.masks, 'server_masks_reorder.pt')
     # 1/0
 
+    learning_rate = args.eta
+    decay = 0.01
     # server.init_global_model()
+
+    # server.model = torch.load('server_model_40.pt')
+
     for round in range(args.rounds):
         keep_masks_dict = {}
         model_list = []
         client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
         global_params = server.get_global_params()
+        client_models = []
 
         for client_id in client_indices:
             client = clients[client_id]
@@ -245,26 +398,54 @@ def main(args):
                 del client.net
                 torch.cuda.empty_cache()
                 client.net = copy.deepcopy(server.model)
+
+            # lr = learning_rate * 1/(1 + decay * round)
+            # lr = learning_rate * 1/(1 + 0.1 * round)
+            # if round == 3:
+            #     learning_rate = 0.001
+            # if round <= 40:
+            #     lr = 0.01
+            # else:
+            #     lr = 0.02
+
             t0 = time.time()
             train_result = client.train(global_params=global_params,
                                         sparsity=1-args.keep_ratio,
                                         single_shot_pruning=args.single_shot_pruning,
                                         test_on_each_round=True,
                                         clip_grad=args.clip_grad,
-                                        global_sparsity=server.model.sparsity_percentage(),
-                                        global_masks=global_masks)
+                                        # global_sparsity=server.model.sparsity_percentage(),
+                                        global_sparsity=1,
+                                        global_masks=global_masks,
+                                        learning_rate=None,
+                                        global_model=server.model,
+                                        round=round,
+                                        prox=args.prox)
             cl_params = train_result['state']
             cl_mask_prarms = train_result['mask']
             download_cost[client_id] = train_result['dl_cost']
             upload_cost[client_id] = train_result['ul_cost']
-            compute_times[client_id] = time.time() - t0
+            # compute_times[client_id] = time.time() - t0
+            compute_times[client_id] = train_result['training_time']
 
             keep_masks_dict[client_id] = cl_mask_prarms
-            # print(client.train_size)
-            model_list.append((client.train_size, cl_params))
+            print(client.train_size)
+            # if client_id != 8:
+            #     client.train_size = client.train_size / 2
+            model_list.append((client.train_size, cl_params, client.output_channels, client.param_idx))
+            client_models.append(client.get_net_params())
 
+        # training_nums = server.training_nums(model_list, server.get_global_params())
+        # yield training_nums
 
         server.aggregate(keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times)
+
+        # if (round+1) % 2 == 0:
+        # if round in [30,40,50,60,70,80]:
+        #     torch.save(server.model, f'server_model_{round}.pt')
+        #     for id, c in clients.items():
+        #         torch.save(c.net, f'client_model_{round}_{id}.pt')
+            # yield client_models, client_indices, server.get_global_params()
 
         # global_masks = server.masks
 

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import math
 from .Pruneable import Pruneable
 from models.networks.assisting_layers.ContainerLayers import ContainerLinear, ContainerConv2d
+from .layers import *
 
 
 __all__ = [
@@ -21,11 +22,14 @@ class VGG(Pruneable):
         self,
         features: nn.Module,
         num_classes: int = 10,
+        output_channel: int=512,
         init_weights: bool = True, device='cpu'
     ) -> None:
         super(VGG, self).__init__(device=device)
         self.features = features
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        # self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        # self.maxpool = nn.MaxPool2d(2)
         # self.classifier = nn.Sequential(OrderedDict([
         #     # nn.Linear(512 * 7 * 7, 4096),
         #     # nn.ReLU(True),
@@ -43,25 +47,26 @@ class VGG(Pruneable):
         #     # self.Linear(512, 10),
         #     ('fc1', self.Linear(512, 512)),  # 512 * 7 * 7 in the original VGG
         #     # nn.LeakyReLU(leak, True),
-        #     # ('relu1', nn.ReLU(True)),
-        #     ('bn1', nn.BatchNorm1d(512)),  # instead of dropout
+        #     ('relu1', nn.ReLU(True)),
+        #     # ('bn1', nn.BatchNorm1d(512)),  # instead of dropout
         #     ('fc2', self.Linear(512, 512)),
         #     # nn.LeakyReLU(leak, True),
-        #     # ('relu2', nn.ReLU(True)),
-        #     ('bn2', nn.BatchNorm1d(512)),  # instead of dropout
+        #     ('relu2', nn.ReLU(True)),
+        #     # ('bn2', nn.BatchNorm1d(512)),  # instead of dropout
         #     ('fc3', self.Linear(512, num_classes)),
         # ]))
         # self.classifier = nn.Linear(512, num_classes)
         self.classifier = nn.Sequential(OrderedDict([
-            ('fc1', nn.Linear(512, num_classes)),
+            ('fc1', Linear(output_channel, num_classes)),
         ]))
         # if init_weights:
-        #     self._initialize_weights()
+        # self._initialize_weights()
 
         self.init_param_sizes()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
+        x = self.avgpool(x)
         # x = self.avgpool(x)
         # x = torch.flatten(x, 1)
         x = x.view(x.size(0), -1)
@@ -75,14 +80,14 @@ class VGG(Pruneable):
         #         m.weight.data.normal_(0, math.sqrt(2. / n))
         #         m.bias.data.zero_()
         for m in self.modules():
-            if isinstance(m, self.Conv2d):
+            if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, self.Linear):
+            elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
 
@@ -103,48 +108,81 @@ class VGG(Pruneable):
 #             in_channels = v
 #     return nn.Sequential(*layers)
 
-def make_layers(cfg, batch_norm=False):
+def make_layers(cfg, batch_norm=False, layer_ratio=None, track_running_stats=True):
     layers = []
     in_channels = 3
+    idx = 0
     for v in cfg:
         if v == 'M':
             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
         else:
-            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
-            if batch_norm:
-                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            if layer_ratio != None:
+                print(f'{idx} : {layer_ratio[idx]}')
+                conv2d = Conv2d(in_channels, v, kernel_size=3, padding=1, ratio=layer_ratio[idx])
+                # conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+                if batch_norm:
+                    layers += [conv2d, nn.BatchNorm2d(v, momentum=None, track_running_stats=track_running_stats), nn.ReLU(inplace=True)]
+                else:
+                    layers += [conv2d, nn.ReLU(inplace=True)]
             else:
-                layers += [conv2d, nn.ReLU(inplace=True)]
+                conv2d = Conv2d(in_channels, v, kernel_size=3, padding=1)
+                if batch_norm:
+                    layers += [conv2d, nn.BatchNorm2d(v, momentum=None, track_running_stats=track_running_stats), nn.ReLU(inplace=True)]
+                else:
+                    layers += [conv2d, nn.ReLU(inplace=True)]
             in_channels = v
+            idx += 1
     return nn.Sequential(*layers)
 
-
 cfgs ={
+    'O': [64, 'M', 128, 'M', 256, 'M', 512, 'M'],
     'A': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'B': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'D': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
     'E': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
 }
 
-
-def vgg11():
-    r"""VGG 11-layer model (configuration "A") from
-    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`._
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-    """
-    return VGG(make_layers(cfgs['A']))
-
-
-def vgg11_bn(device='cpu'):
+def vgg4_bn(device='cpu', output_channels=None, layer_ratio=None):
     r"""VGG 11-layer model (configuration "A") with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`._
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return VGG(make_layers(cfgs['A'], batch_norm=True), device=device)
+    if output_channels == None:
+        print(layer_ratio)
+        return VGG(make_layers([64, 'M', 128, 'M', 256, 'M', 512, 'M'], batch_norm=True, layer_ratio=layer_ratio), output_channel=512, device=device)
+    else:
+        print(layer_ratio)
+        return VGG(make_layers([output_channels[0], 'M', output_channels[1], 'M', output_channels[2], 'M', output_channels[3], 'M'], batch_norm=True, layer_ratio=layer_ratio), output_channel=output_channels[3], device=device)
+
+
+def vgg11(device='cpu', output_channels=None, layer_ratio=None):
+    r"""VGG 11-layer model (configuration "A") from
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`._
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    if output_channels == None:
+        return VGG(make_layers([64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M']), output_channel=512, device=device)
+    else:
+        print(layer_ratio)
+        return VGG(make_layers([output_channels[0], 'M', output_channels[1], 'M', output_channels[2], output_channels[3], 'M', output_channels[4], output_channels[5], 'M', output_channels[6], output_channels[7], 'M'], layer_ratio=layer_ratio), output_channel=output_channels[7], device=device)
+
+def vgg11_bn(device='cpu', output_channels=None, layer_ratio=None):
+    r"""VGG 11-layer model (configuration "A") with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`._
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    if output_channels == None:
+        print(layer_ratio)
+        return VGG(make_layers([64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'], batch_norm=True, layer_ratio=layer_ratio), output_channel=512, device=device)
+    else:
+        print(layer_ratio)
+        return VGG(make_layers([output_channels[0], 'M', output_channels[1], 'M', output_channels[2], output_channels[3], 'M', output_channels[4], output_channels[5], 'M', output_channels[6], output_channels[7], 'M'], batch_norm=True, layer_ratio=layer_ratio), output_channel=output_channels[7], device=device)
 
 
 def vgg13():

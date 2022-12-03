@@ -1,0 +1,1 @@
+python3 -u fedsnip.py --dataset cifar10 --eta 0.01 --total-clients 10 --clients 10 --batch-size 512 --rounds 100 --model VGG11_BN --epochs 10  --device 2 --prune_strategy synflow --keep_ratio 0.1 --target_keep_ratio 0.005 --prune_at_first_round --single_shot_pruning --partition_method hetero --partition_alpha 0.5 --num_pruning_steps 100

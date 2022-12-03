@@ -1,4 +1,5 @@
 import copy
+from enum import Flag
 from torch import nn
 import utils
 from collections import Counter
@@ -9,6 +10,8 @@ import torch.nn as nn
 from models.vgg import VGG
 import math
 import random
+import torch.nn.functional as F
+from collections import OrderedDict
 
 import wandb
 
@@ -16,7 +19,7 @@ def needs_mask(layer_name):
     return layer_name.endswith('weight') and ('bn' not in layer_name)
 
 class Server:
-    def __init__(self, model, device, train_data=None, prune_strategy='None', target_keep_ratio=1.) -> None:
+    def __init__(self, model, device, train_data=None, prune_strategy='None', target_keep_ratio=1., clients=None) -> None:
         self.device = device
         self.model = model(self.device).to(self.device)
         self._init_masks()
@@ -28,6 +31,9 @@ class Server:
         self.prune_strategy = prune_strategy
         self.target_keep_ratio = target_keep_ratio
         self.vote = None
+        self.output_channels = None
+        self.min_channels = None
+        self.clients = clients
         # torch.save(self.model.state_dict(), 'ori_init_model.pt')
 
     def _init_masks(self):
@@ -359,7 +365,10 @@ class Server:
 
     def merge_masks(self, keep_masks_dict, keep_ratio, download_cost, upload_cost, compute_times, last_masks, num_training_data=None):
         self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
-        self.compute_time += self.round_compute_time(compute_times)
+        # self.compute_time += self.round_compute_time(compute_times)
+        # self.compute_time += max(compute_times)
+
+        # self.compute_time += 48.326801575719195
 
         # print(f'keep masks dict[0]: {keep_masks_dict[0]}')
         assert keep_masks_dict[0] is not None, 'pruning stage local keep masks can not be None'
@@ -387,32 +396,403 @@ class Server:
 
 
 
+    # def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times):
+    #     self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
+    #     self.compute_time += self.round_compute_time(compute_times)
+    #     last_params = self.get_global_params()
+
+    #     training_num = sum(local_train_num for (local_train_num, _) in model_list)
+
+    #     (num0, averaged_params) = model_list[0]
+    #     if (averaged_params is not None):
+    #         for k in averaged_params.keys():
+    #             for i in range(0, len(model_list)):
+    #                 local_sample_number, local_model_params = model_list[i]
+    #                 w = local_sample_number / training_num
+    #                 if i == 0:
+    #                     averaged_params[k] = local_model_params[k] * w
+    #                 else:
+    #                     averaged_params[k] += local_model_params[k] * w
+
+    #         # for name, param in averaged_params.items():
+    #         for name in last_params:
+    #             assert (last_params[name].shape == averaged_params[name].shape)
+    #             averaged_params[name] = averaged_params[name].type_as(last_params[name])
+    #             # last_params[name] = last_params[name].type_as(averaged_params[name])
+    #             last_params[name] += averaged_params[name]
+    #         self.set_global_params(last_params)
+
+    # def training_nums(self, model_list, last_params):
+    #     training_nums = {}
+    #     idx = -1
+    #     for k, p in last_params.items():
+    #         dim = len(p.data.shape)
+    #         if dim == 0:
+    #             continue
+    #         if dim == 4:
+    #             idx += 1
+    #             max_channel = p.data.shape[0]
+    #         elif dim == 2:
+    #             max_channel = p.data.shape[1]
+    #         tn = torch.zeros(max_channel)
+    #         # i = 0
+    #         for local_sample_number, local_model_params, output_channel in model_list:
+    #             # print(f'client {i} output_channel[{idx}]: {output_channel[idx]}')
+    #             # i += 1
+    #             tn[:output_channel[idx]] += local_sample_number
+    #             # print(f'local_sample_number: {local_sample_number}')
+    #         # training_nums.append(tn)
+    #         # print(f'{k} -- {idx}')
+    #         training_nums[k] = tn
+    #     # print(training_nums)
+    #     return training_nums
+
+    def training_nums(self, model_list, last_params):
+        training_nums = {}
+        idx = -1
+        last_layer_dim = 0
+        for k, p in last_params.items():
+            dim = len(p.data.shape)
+            if dim == 4 and 'shortcut' not in k:
+                idx += 1
+            #     max_channel = p.data.shape[0]
+            # elif dim == 2:
+            #     max_channel = p.data.shape[1]
+            tn = torch.zeros(p.data.shape)
+            # i = 0
+            for local_sample_number, local_model_params, output_channel, _ in model_list:
+                # print(f'client {i} output_channel[{idx}]: {output_channel[idx]}')
+                # i += 1
+                skip_bn = False
+                for oc in output_channel:
+                    if oc not in self.output_channels:
+                        skip_bn = True
+
+                if 'shortcut' in k:
+                    # print(f'{k} {global_state_dict[k].shape}')
+                    if dim == 3:
+                        tn[:output_channel[idx],:,:] += local_sample_number
+                    elif dim == 4:
+                        tn[:output_channel[idx],:output_channel[idx-2],:,:] += local_sample_number
+                    elif dim == 1:
+                        tn[:output_channel[idx]] += local_sample_number
+                elif dim == 4:
+                    prio_channel = 3 if idx == 0 else output_channel[idx-1]
+                    print(f'output_channel[{idx}] -- {output_channel[idx]}, prio_channel: {prio_channel}')
+                    tn[:output_channel[idx],:prio_channel,:,:] += local_sample_number
+                elif dim == 1:
+                    # if not skip_bn:
+                    # if last_layer_dim == 4:
+                    #     tn[:output_channel[idx]] += local_sample_number
+                    # elif output_channel[idx] == self.output_channels[idx]:
+                    # if output_channel[idx] == self.output_channels[idx]:
+                    tn[:output_channel[idx]] += local_sample_number 
+                    # else:
+                    #     if 'running' not in k:
+                    #         tn[:output_channel[idx]] += local_sample_number
+                elif dim == 2:
+                    tn[:,:output_channel[idx]] += local_sample_number
+                else:
+                    tn += local_sample_number
+            last_layer_dim = len(p.data.shape)
+                # print(f'local_sample_number: {local_sample_number}')
+            # training_nums.append(tn)
+            # print(f'{k} -- {idx}')
+            training_nums[k] = tn
+        # print(training_nums)
+        return training_nums
+
+    # def reorder_params(self, params):
+
+    def exchange_dim(self, model_params):
+        prio_exchange_idx = [0,1,2]
+        for k, p in model_params.items():
+            if len(p.shape) == 4:
+    #             exchange_idx = []
+    #             for i in range(p.shape[0])
+                exchange_idx = np.argsort([p[i,:,:,:].mean().cpu() for i in range(p.shape[0])])
+    #             print(exchange_idx)
+                model_params[k] = model_params[k][:,prio_exchange_idx,:,:]
+                model_params[k] = model_params[k][exchange_idx,:,:,:]
+                prio_exchange_idx = exchange_idx
+            elif len(p.shape) == 1:
+    #             print(p.shape)
+    #             print(prio_exchange_idx)
+                model_params[k] = model_params[k][prio_exchange_idx]
+            elif len(p.shape) == 2:
+                model_params[k] = model_params[k][:,prio_exchange_idx]
+                prio_exchange_idx = [i for i in range(10)]
+
+    # def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times):
+    #     count = OrderedDict()
+    #     global_params = self.get_global_params()
+    #     output_weight_name = [k for k in global_params.keys() if 'weight' in k][-1]
+    #     output_bias_name = [k for k in global_params.keys() if 'bias' in k][-1]
+    #     for k, v in global_params.items():
+    #         parameter_type = k.split('.')[-1]
+    #         count[k] = v.new_zeros(v.size(), dtype=torch.float32)
+    #         tmp_v = v.new_zeros(v.size(), dtype=torch.float32)
+    #         for m in range(len(model_list)):
+    #             local_sample_number, local_parameters, output_channel, param_idx = model_list[m]
+    #             if 'weight' in parameter_type or 'bias' in parameter_type:
+    #                 if parameter_type == 'weight':
+    #                     if v.dim() > 1:
+    #                         if k == output_weight_name:
+    #                             # label_split = self.label_split[user_idx[m]]
+    #                             param_idx[k] = list(param_idx[k])
+    #                             # param_idx[m][k][0] = param_idx[m][k][0][label_split]
+    #                             tmp_v[torch.meshgrid(param_idx[k])] += local_parameters[k] * local_sample_number
+    #                             count[k][torch.meshgrid(param_idx[k])] += local_sample_number
+
+    #                             # tmp_v[torch.meshgrid(param_idx[k])] += local_parameters[k] 
+    #                             # count[k][torch.meshgrid(param_idx[k])] += 1
+    #                         else:
+    #                             tmp_v[torch.meshgrid(param_idx[k])] += local_parameters[k] * local_sample_number
+    #                             count[k][torch.meshgrid(param_idx[k])] += local_sample_number
+
+    #                             # tmp_v[torch.meshgrid(param_idx[k])] += local_parameters[k] 
+    #                             # count[k][torch.meshgrid(param_idx[k])] += 1
+    #                     else:
+    #                         tmp_v[param_idx[k]] += local_parameters[k]  * local_sample_number
+    #                         count[k][param_idx[k]] += local_sample_number
+
+    #                         # tmp_v[param_idx[k]] += local_parameters[k] 
+    #                         # count[k][param_idx[k]] += 1
+    #                 else:
+    #                     if k == output_bias_name:
+    #                         # label_split = self.label_split[user_idx[m]]
+    #                         # param_idx[m][k] = param_idx[m][k][label_split]
+    #                         tmp_v[param_idx[k]] += local_parameters[k]  * local_sample_number
+    #                         count[k][param_idx[k]] += local_sample_number
+                            
+    #                         # tmp_v[param_idx[k]] += local_parameters[k] 
+    #                         # count[k][param_idx[k]] += 1
+    #                     else:
+    #                         tmp_v[param_idx[k]] += local_parameters[k]  * local_sample_number
+    #                         count[k][param_idx[k]] += local_sample_number
+
+    #                         # tmp_v[param_idx[k]] += local_parameters[k] 
+    #                         # count[k][param_idx[k]] += 1
+    #             else:
+    #                 # if v.dim() == 1:
+    #                 #     tmp_v[param_idx[k]] += local_parameters[k] 
+    #                 #     count[k][param_idx[k]] += 1
+    #                 # else:
+    #                 tmp_v += local_parameters[k]  * local_sample_number
+    #                 count[k] += local_sample_number
+                    
+    #                 # tmp_v += local_parameters[k] 
+    #                 # count[k] += 1
+    #         # tmp_v[count[k] > 0] = tmp_v[count[k] > 0].div_(count[k][count[k] > 0])
+    #         tmp_v[count[k] > 0] = tmp_v[count[k] > 0] / 50000.
+    #         v[count[k] > 0] += tmp_v[count[k] > 0].to(v.dtype)
+        
+    #     self.set_global_params(global_params)
+
     def aggregate(self, keep_masks_dict, model_list, round, download_cost, upload_cost, compute_times):
         self.transmission_cost += self.round_trans_cost(download_cost, upload_cost)
-        self.compute_time += self.round_compute_time(compute_times)
+        # self.compute_time += self.round_compute_time(compute_times)
+
+        # self.compute_time += 48.326801575719195
+        self.compute_time += 34.55108474620484
+
         last_params = self.get_global_params()
 
-        training_num = sum(local_train_num for (local_train_num, _) in model_list)
+        training_num = sum(local_train_num for (local_train_num, _, _, _) in model_list)
 
-        (num0, averaged_params) = model_list[0]
-        if (averaged_params is not None):
-            for k in averaged_params.keys():
+        # for _, model_params, _ in model_list:
+        #     self.exchange_dim(model_params)
+
+        prio_channel = 3
+        if model_list[0][2] != None:
+            # torch.Size([64, 3, 3, 3]) == 64 == torch.Size([64, 3, 3, 3])
+            # torch.Size([64, 3, 3, 3]) == 128 == torch.Size([64, 3, 3, 3])
+            # torch.Size([64, 3, 3, 3]) == 95 == torch.Size([64, 3, 3, 3])
+            # torch.Size([64, 3, 3, 3]) == 256 == torch.Size([64, 3, 3, 3])
+            # torch.Size([64, 3, 3, 3]) == 60 == torch.Size([64, 3, 3, 3])
+
+            training_nums = self.training_nums(model_list, last_params)
+
+            idx = -1
+            last_layer_dim = 0
+            for k in last_params.keys():
+                if len(last_params[k].shape) == 4 and 'shortcut' not in k:
+                    idx += 1
+                # prio_channel = [3] * len(model_list)
+                count = 0
                 for i in range(0, len(model_list)):
-                    local_sample_number, local_model_params = model_list[i]
+                    local_sample_number, local_model_params, output_channel, _ = model_list[i]
+                    # if local_sample_number != 8078:
+                    #     local_sample_number = local_sample_number / 2
                     w = local_sample_number / training_num
-                    if i == 0:
-                        averaged_params[k] = local_model_params[k] * w
+                    skip_bn = False
+                    for oc in output_channel:
+                        if oc not in self.output_channels:
+                            skip_bn = True
+                    if 'num_batches_tracked' in k:
+                        w = local_sample_number / training_num
                     else:
-                        averaged_params[k] += local_model_params[k] * w
+                        # print(f'training_nums[{k}][output_channel[{idx}]-1]: {training_nums[k][output_channel[idx]-1]}')
+                        # print(f'{k}: output_channel {output_channel[idx]}, training_num {training_nums[k][output_channel[idx]-1]}')
+                        # w = local_sample_number / training_nums[k][output_channel[idx]-1]
+                        pass
+                    shape_dim = len(last_params[k].shape)
 
-            # for name, param in averaged_params.items():
-            for name in last_params:
-                assert (last_params[name].shape == averaged_params[name].shape)
-                averaged_params[name] = averaged_params[name].type_as(last_params[name])
-                # last_params[name] = last_params[name].type_as(averaged_params[name])
-                last_params[name] += averaged_params[name]
+                    if 'shortcut' in k:
+                        if k not in local_model_params.keys():
+                            continue
+                        # print(f'{k} {global_state_dict[k].shape}')
+                        if shape_dim == 3:
+                            last_params[k][:output_channel[idx],:,:] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx],:,:])
+                        elif shape_dim == 4:
+                            last_params[k][:output_channel[idx],:output_channel[idx-2],:,:] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx],:output_channel[idx-2],:,:])
+                        elif shape_dim == 1:
+                            last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+                    elif shape_dim == 4:
+                        prio_channel = 3 if idx == 0 else output_channel[idx-1]
+                        min_prio_channel = 3 if idx == 0 else self.min_channels[idx-1]
+                        # print(f'{last_params[k].shape} == {output_channel[idx]} == {local_model_params[k].shape}')
+                        # if output_channel[idx] > self.min_channels[idx]:
+                        #     local_model_params[k][:self.min_channels[idx],:min_prio_channel, :, :] *= 2
+                        last_params[k][:output_channel[idx],:prio_channel,:,:] += local_model_params[k] * w
+                        # last_params[k][:output_channel[idx],:prio_channel,:,:] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx],:prio_channel,:,:])
+
+                        trip = True
+                        # prio_channel[i] = output_channel[idx]
+                    elif shape_dim == 1:
+                        # print(f'{last_params[k].shape} == {output_channel[idx]} == {local_model_params[k].shape}')
+                        # last_params[k][:output_channel[idx]] += local_model_params[k] * w
+                        # if not skip_bn :
+                        # if last_layer_dim == 4:
+                        #     last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+
+                        # elif output_channel[idx] == self.output_channels[idx]:
+                            # count += 1
+                        # if output_channel[idx] == self.output_channels[idx]:
+                        # last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+                        # if output_channel[idx] > self.min_channels[idx]:
+                        #     local_model_params[k][:self.min_channels[idx]] *= 2
+                        last_params[k][:output_channel[idx]] += local_model_params[k] * w
+                        # else:
+                        #     if 'running' not in k:
+                        #         last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+                        #     last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+                            # last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/26120.)
+                        # if 'running' not in k:
+                        #     last_params[k][:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:output_channel[idx]])
+                    elif shape_dim == 2:
+                        # print(f'{last_params[k].shape} == {output_channel[idx]} == {local_model_params[k].shape}')
+                        # if output_channel[idx] > self.min_channels[idx]:
+                        #     local_model_params[k][:,:self.min_channels[idx]] *= 2
+                        last_params[k][:,:output_channel[idx]] += local_model_params[k] * w
+                        # last_params[k][:,:output_channel[idx]] += local_model_params[k] * (local_sample_number/training_nums[k][:,:output_channel[idx]])
+                    # else:
+                    #     last_params[k] += (local_model_params[k] * w).type_as(last_params[k])
+                        # last_params[k] += (local_model_params[k] * (local_sample_number/training_nums[k])).type_as(last_params[k])
+                last_layer_dim = len(last_params[k].shape)
+                # print(f'{k} aggregate {count} clients')
+                # if shape_dim == 4:
+                #     idx += 1
+
             self.set_global_params(last_params)
+
+        # else:
+        # (num0, averaged_params, _, _) = model_list[0]
+        # if (averaged_params is not None):
+        #     for k in averaged_params.keys():
+        #         for i in range(0, len(model_list)):
+        #             local_sample_number, local_model_params, _, _ = model_list[i]
+        #             w = local_sample_number / training_num
+        #             if i == 0:
+        #                 averaged_params[k] = local_model_params[k] * w
+        #             else:
+        #                 averaged_params[k] += local_model_params[k] * w
+
+        #     # for name, param in averaged_params.items():
+        #     for name in last_params:
+        #         assert (last_params[name].shape == averaged_params[name].shape)
+        #         averaged_params[name] = averaged_params[name].type_as(last_params[name])
+        #         # last_params[name] = last_params[name].type_as(averaged_params[name])
+        #         last_params[name] += averaged_params[name]
+        #     self.set_global_params(last_params)
+
+        # self.distill_submodel()
   
+
+    def distill_submodel(self):
+        # for idx in self.clients.keys():
+        idx = random.randint(0,9)
+        c = self.clients[idx]
+        c.reset_weights(self.get_global_params())
+        submodel = c.net.to(self.device)
+        init_params = copy.deepcopy(submodel.state_dict())
+        divergence_loss_fn = nn.KLDivLoss(reduction="batchmean")
+        temp = 1
+        self.model = self.model.to(self.device)
+        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, submodel.parameters()), lr=0.01, weight_decay=1e-5)
+        for inputs, labels in c.train_data:
+            # pass
+            inputs = inputs.to(self.device)
+            labels = labels.to(self.device)
+
+            submodel.zero_grad()
+            with torch.no_grad():
+                teacher_preds = self.model(inputs)
+            student_preds = submodel(inputs)
+            # loss = self.criterion(outputs, labels)
+            ditillation_loss = divergence_loss_fn(
+                F.softmax(student_preds / temp, dim=1),
+                F.softmax(teacher_preds / temp, dim=1)
+            )
+            # if args.prox > 0:
+            #     loss += args.prox / 2. * self.net.proximal_loss(global_params)
+            ditillation_loss.backward()
+
+            # if clip_grad:
+            #     torch.nn.utils.clip_grad_norm_(self.net.parameters(), 10.0)
+
+            optimizer.step()
+
+            # c.reset_weights(submodel.cpu().state_dict())
+        # finish_params = submodel.state_dict()
+        # for param_tensor in finish_params:
+        #     finish_params[param_tensor] -= init_params[param_tensor]
+
+        self.reset_global_model(submodel.state_dict(), c)
+
+    def reset_global_model(self, submodel_state_dict, client):
+        prio_channel = 3
+        local_params = self.model.state_dict()
+        output_channels = client.output_channels
+        idx = -1
+
+        for k in local_params.keys():
+            
+            shape_dim = len(local_params[k].shape)
+            # print(local_params[k].shape)
+            if 'shortcut' in k:
+                print(f'{k} {submodel_state_dict[k].shape}')
+                if shape_dim == 3:
+                    local_params[k].copy_(submodel_state_dict[k][:output_channels[idx],:,:])
+                elif shape_dim == 4:
+                    local_params[k].copy_(submodel_state_dict[k][:output_channels[idx],:output_channels[idx-2],:,:])
+                elif shape_dim == 1:
+                    local_params[k].copy_(submodel_state_dict[k][:output_channels[idx]])
+            elif shape_dim == 4:
+                print(k)
+                idx += 1
+                # print(f'{local_params[k].shape} == {self.output_channels[idx]}')
+                local_params[k][:output_channels[idx],:prio_channel,:,:].copy_(submodel_state_dict[k])
+                # local_params[k].copy_(submodel_state_dict[k][:self.output_channels[idx],:prio_channel,:,:])
+                prio_channel = output_channels[idx]
+            elif shape_dim == 1:
+                # print(local_params[k].shape)
+                if 'running' not in k:
+                    local_params[k][:output_channels[idx]].copy_(submodel_state_dict[k])
+                # local_params[k].copy_(submodel_state_dict[k][:self.output_channels[idx]])
+            elif shape_dim == 2:
+                # print(f'{local_params[k].shape} == {self.output_channels[idx]}')
+                local_params[k][:,:output_channels[idx]].copy_(submodel_state_dict[k])
 
     def test_global_model_on_all_client(self, clients, round):
         # pruned_c = 0.0

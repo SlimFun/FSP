@@ -314,7 +314,7 @@ class Client:
                 self.criterion(outputs, labels).backward()
 
                 self.net.layer_prune(sparsity=prune_sparsity, sparsity_distribution=args.sparsity_distribution)
-                self.net.layer_grow(sparsity=sparsity, sparsity_distribution=args.sparsity_distribution)
+                self.net.layer_grow(sparsity=(1 - sparsity) * args.readjustment_ratio, sparsity_distribution=args.sparsity_distribution)
                 ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask
             self.curr_epoch += 1
 
@@ -454,7 +454,8 @@ for server_round in tqdm(range(args.rounds)):
         t0 = time.process_time()
         
         if args.rate_decay_method == 'cosine':
-            readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
+            # readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
+            readjustment_ratio = global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
         else:
             readjustment_ratio = args.readjustment_ratio
 
